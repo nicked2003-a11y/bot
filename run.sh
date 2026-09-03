@@ -20,14 +20,14 @@ install_all_dependencies() {
 
     # Wings install agar exist nahi karta
     if [ ! -f /usr/local/bin/wings ]; then
-        mkdir -p /etc/pterodactyl /var/lib/pterodactyl/volumes
+        mkdir -p /etc/pterodactyl /var/lib/pterodactyl
         curl -L -o /usr/local/bin/wings "https://github.com/pterodactyl/wings/releases/latest/download/wings_linux_amd64" >/dev/null 2>&1
         chmod u+x /usr/local/bin/wings
     fi
     echo -e "${GREEN}✓ Sabhi tools ready hain!${NC}\n"
 }
 
-# 1. Blomp Login Setup (FIXED)
+# 1. Blomp Login Setup
 setup_blomp() {
     echo -e "${CYAN}======================================${NC}"
     echo -e "${CYAN}      BLOMP CLOUD LOGIN SETUP         ${NC}"
@@ -38,7 +38,6 @@ setup_blomp() {
 
     echo -e "${YELLOW}Blomp se Connect kiya ja raha hai...${NC}"
 
-    # Native Rclone Config (Handles special characters in password safely)
     rclone config create blomp swift \
         user "$blomp_user" \
         key "$blomp_pass" \
@@ -46,15 +45,13 @@ setup_blomp() {
         tenant "$blomp_user" \
         auth_version 1 >/dev/null 2>&1
 
-    # Test & Create Remote Folder
-    if rclone mkdir blomp:MinecraftBackup 2>/dev/null; then
+    if rclone mkdir blomp:FullServerBackup 2>/dev/null; then
         echo -e "${GREEN}✓ SUCCESS: Blomp Cloud Connect ho gaya!${NC}"
     else
-        echo -e "${RED}✗ Login Failed! Email ya Password galat hai.${NC}"
-        echo -e "${RED}  Check karein ke aap Blomp ki website par login ho pa rahe hain ya nahi.${NC}"
+        echo -e "${RED}✗ Login Failed! Email ya Password check karein.${NC}"
         rclone config delete blomp >/dev/null 2>&1
     fi
-    sleep 3
+    sleep 2
 }
 
 # Check Blomp Login Status
@@ -65,49 +62,52 @@ check_blomp_login() {
     fi
 }
 
-# 2. Auto Backup (Every 15 mins)
+# 2. Full Auto Backup (Har 15 Min)
 start_auto_backup() {
     check_blomp_login
     
-    # Double check if login succeeded
     if ! rclone listremotes 2>/dev/null | grep -q "blomp:"; then
         return
     fi
 
     echo -e "${CYAN}======================================${NC}"
-    echo -e "${CYAN}   AUTO BACKUP SETUP (Har 15 Min)     ${NC}"
+    echo -e "${CYAN}   FULL AUTO BACKUP SETUP (Har 15 Min) ${NC}"
     echo -e "${CYAN}======================================${NC}"
 
-    # Background auto-backup script
-    cat << 'EOF' > /root/do_backup.sh
+    # Script for complete backup
+    cat << 'EOF' > /root/do_full_backup.sh
 #!/bin/bash
 TIME=$(date +%Y-%m-%d_%H-%M)
-FILE="backup_${TIME}.tar.gz"
+FILE="FULL_BACKUP_${TIME}.tar.gz"
 
-# Compress Pterodactyl Data
-tar -czf "/root/${FILE}" /var/lib/pterodactyl/volumes /etc/pterodactyl 2>/dev/null
+# Pack EVERYTHING: Servers, Configs, SSL Certs
+tar -czf "/root/${FILE}" \
+    /var/lib/pterodactyl \
+    /etc/pterodactyl \
+    /etc/letsencrypt \
+    2>/dev/null
 
-# Upload to Blomp Cloud
-rclone copy "/root/${FILE}" blomp:MinecraftBackup/
+# Upload FULL backup to Blomp
+rclone copy "/root/${FILE}" blomp:FullServerBackup/
 
-# Remove local file
+# Delete local copy to save VPS Disk Space
 rm -f "/root/${FILE}"
 EOF
 
-    chmod +x /root/do_backup.sh
+    chmod +x /root/do_full_backup.sh
 
     # Setup 15-min cron
-    crontab -l 2>/dev/null | grep -v "do_backup" | crontab -
-    (crontab -l 2>/dev/null; echo "*/15 * * * * /root/do_backup.sh >/dev/null 2>&1") | crontab -
+    crontab -l 2>/dev/null | grep -v "do_full_backup" | crontab -
+    (crontab -l 2>/dev/null; echo "*/15 * * * * /root/do_full_backup.sh >/dev/null 2>&1") | crontab -
 
-    echo -e "${GREEN}✓ Auto Backup Scheduler ON ho gaya hai (Har 15 min).${NC}"
-    echo -e "${YELLOW}Abhi Pehla Backup lia ja raha hai (Wait karein)...${NC}"
-    /root/do_backup.sh
-    echo -e "${GREEN}✓ Pehla backup Blomp Cloud par successfully save ho gaya!${NC}"
+    echo -e "${GREEN}✓ FULL Auto Backup Scheduler Active ho gaya (Har 15 min).${NC}"
+    echo -e "${YELLOW}Pehla Full Backup abhi lia ja raha hai (Heavy Data hai, Thoda Wait Karein)...${NC}"
+    /root/do_full_backup.sh
+    echo -e "${GREEN}✓ Full Backup Blomp Cloud par successfully Upload ho gaya!${NC}"
     sleep 3
 }
 
-# 3. Restore Backup from List
+# 3. Full Restore Backup from List
 restore_backup() {
     check_blomp_login
 
@@ -116,11 +116,11 @@ restore_backup() {
     fi
 
     echo -e "${CYAN}======================================${NC}"
-    echo -e "${CYAN}   BLOMP SE BACKUP RESTORE KAREIN     ${NC}"
+    echo -e "${CYAN}   FULL SYSTEM RESTORE FROM BLOMP     ${NC}"
     echo -e "${CYAN}======================================${NC}"
-    echo -e "${YELLOW}Backups list load ho rahi hai...${NC}"
+    echo -e "${YELLOW}Blomp Cloud se FULL Backups ki list aa rahi hai...${NC}"
 
-    mapfile -t files < <(rclone lsf blomp:MinecraftBackup/ --include "*.tar.gz" 2>/dev/null)
+    mapfile -t files < <(rclone lsf blomp:FullServerBackup/ --include "*.tar.gz" 2>/dev/null)
 
     if [ ${#files[@]} -eq 0 ]; then
         echo -e "${RED}✗ Blomp Cloud par koi backup nahi mila!${NC}"
@@ -129,31 +129,36 @@ restore_backup() {
         return
     fi
 
-    echo -e "${GREEN}Available Backups:${NC}"
-    echo "----------------------------------------"
+    echo -e "${GREEN}Mile hue Full Backups:${NC}"
+    echo "--------------------------------------------------------"
     for i in "${!files[@]}"; do
         echo -e "${YELLOW}$((i+1)))${NC} ${files[$i]}"
     done
-    echo "----------------------------------------"
+    echo "--------------------------------------------------------"
     
-    read -p "Konsa backup restore karna hai? [1-${#files[@]}]: " choice < /dev/tty
+    read -p "Konsa FULL Backup Restore karna hai? [1-${#files[@]}]: " choice < /dev/tty
 
     if [[ "$choice" -ge 1 && "$choice" -le "${#files[@]}" ]] 2>/dev/null; then
         selected="${files[$((choice-1))]}"
-        echo -e "\n${YELLOW}Downloading: ${selected} ...${NC}"
-        rclone copy "blomp:MinecraftBackup/${selected}" /root/
+        echo -e "\n${YELLOW}Downloading Heavy Data: ${selected} ... (Wait karein)${NC}"
+        rclone copy "blomp:FullServerBackup/${selected}" /root/
 
-        echo -e "${YELLOW}Data Extract aur Wings mein Restore ho raha hai...${NC}"
+        echo -e "${YELLOW}100% System Extract & Restore Ho Raha Hai...${NC}"
         tar -xzf "/root/${selected}" -C / 2>/dev/null
         rm -f "/root/${selected}"
 
-        # Restart Wings
+        # Restarting Docker and Wings Services
+        systemctl restart docker >/dev/null 2>&1
         systemctl restart wings >/dev/null 2>&1
 
-        echo -e "${GREEN}======================================${NC}"
-        echo -e "${GREEN}  ✓ RESTORE 100% SUCCESSFUL!         ${NC}"
-        echo -e "${GREEN}  Minecraft Server & Wings Online!    ${NC}"
-        echo -e "${GREEN}======================================${NC}"
+        # Automatically start auto-backup process on new VPS too
+        start_auto_backup
+
+        echo -e "${GREEN}====================================================${NC}"
+        echo -e "${GREEN}  ✓ FULL RESTORE SUCCESSFUL!                       ${NC}"
+        echo -e "${GREEN}  Saara Data, Servers, World, Plugins Wapas Aa Gaye!${NC}"
+        echo -e "${GREEN}  Wings Service Live ho chuki hai.                  ${NC}"
+        echo -e "${GREEN}====================================================${NC}"
     else
         echo -e "${RED}Galat option chuna!${NC}"
     fi
@@ -165,16 +170,16 @@ install_all_dependencies
 
 while true; do
     clear
-    echo -e "${GREEN}╔══════════════════════════════════════════╗${NC}"
-    echo -e "${GREEN}║   PTERODACTYL & MINECRAFT CLOUD MANAGER  ║${NC}"
-    echo -e "${GREEN}╠══════════════════════════════════════════╣${NC}"
-    echo -e "${GREEN}║                                          ║${NC}"
-    echo -e "${GREEN}║  ${YELLOW}1)${NC} Auto-Backup ON (Har 15 Minutes)        ${GREEN}║${NC}"
-    echo -e "${GREEN}║  ${YELLOW}2)${NC} Restore Backup (1, 2, 3 List)          ${GREEN}║${NC}"
-    echo -e "${GREEN}║  ${YELLOW}3)${NC} Blomp Cloud Login / Re-login           ${GREEN}║${NC}"
-    echo -e "${GREEN}║  ${YELLOW}4)${NC} Exit                                   ${GREEN}║${NC}"
-    echo -e "${GREEN}║                                          ║${NC}"
-    echo -e "${GREEN}╚══════════════════════════════════════════╝${NC}"
+    echo -e "${GREEN}╔═════════════════════════════════════════════════╗${NC}"
+    echo -e "${GREEN}║  PTERODACTYL & MINECRAFT FULL CLOUD MANAGER v3  ║${NC}"
+    echo -e "${GREEN}╠═════════════════════════════════════════════════╣${NC}"
+    echo -e "${GREEN}║                                                 ║${NC}"
+    echo -e "${GREEN}║  ${YELLOW}1)${NC} FULL Auto-Backup ON (Har 15 Minutes)       ║${NC}"
+    echo -e "${GREEN}║  ${YELLOW}2)${NC} FULL Restore (1, 2, 3 List Se Choose)     ║${NC}"
+    echo -e "${GREEN}║  ${YELLOW}3)${NC} Blomp Cloud Login / Setup                 ║${NC}"
+    echo -e "${GREEN}║  ${YELLOW}4)${NC} Exit                                          ║${NC}"
+    echo -e "${GREEN}║                                                 ║${NC}"
+    echo -e "${GREEN}╚═════════════════════════════════════════════════╝${NC}"
     read -p "Option chunein [1-4]: " opt < /dev/tty
 
     case $opt in
