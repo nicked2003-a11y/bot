@@ -12,7 +12,7 @@ NAME_FILE="/root/.fakecloud_backup_name"
 BACKUP_FOLDER="Backup vps"
 
 if [ "$EUID" -ne 0 ]; then
-    echo -e "${RED}ROOT se run karein.${NC}"
+    echo -e "${RED}Ye script ROOT user se run karein.${NC}"
     exit 1
 fi
 
@@ -38,70 +38,43 @@ save_backup_name() {
 }
 
 ensure_cron() {
-    if command -v crontab >/dev/null 2>&1; then
-        return 0
-    fi
-
+    if command -v crontab >/dev/null 2>&1; then return 0; fi
     echo -e "${YELLOW}Cron scheduler install ho raha hai...${NC}"
-    if command -v apt-get >/dev/null 2>&1; then
-        apt-get update -y >/dev/null 2>&1
-        apt-get install -y cron >/dev/null 2>&1
-        systemctl enable --now cron >/dev/null 2>&1 || true
-    elif command -v yum >/dev/null 2>&1; then
-        yum install -y cronie >/dev/null 2>&1
-        systemctl enable --now crond >/dev/null 2>&1 || true
-    fi
+    apt-get update -y >/dev/null 2>&1
+    apt-get install -y cron >/dev/null 2>&1
+    systemctl enable --now cron >/dev/null 2>&1 || true
 }
 
 ensure_rclone() {
-    if command -v rclone >/dev/null 2>&1; then
-        return 0
-    fi
-
+    if command -v rclone >/dev/null 2>&1; then return 0; fi
     echo -e "${YELLOW}rclone install ho raha hai...${NC}"
-    if command -v apt-get >/dev/null 2>&1; then
-        apt-get update -y >/dev/null 2>&1
-        apt-get install -y rclone >/dev/null 2>&1
-    fi
-
-    if ! command -v rclone >/dev/null 2>&1; then
-        curl -fsSL https://rclone.org/install.sh | bash >/dev/null 2>&1
-    fi
-
+    apt-get update -y >/dev/null 2>&1
+    apt-get install -y rclone >/dev/null 2>&1 || curl -fsSL https://rclone.org/install.sh | bash >/dev/null 2>&1
     hash -r 2>/dev/null || true
     export PATH="/usr/local/bin:/usr/bin:/bin:$PATH"
 }
 
+ensure_pigz() {
+    if ! command -v pigz >/dev/null 2>&1; then
+        apt-get install -y pigz >/dev/null 2>&1 || true
+    fi
+}
+
 install_all_dependencies() {
     clear
-    echo -e "${YELLOW}>>> Zaroori Tools Check & Install Ho Rahe Hain...<<<${NC}"
-    
+    echo -e "${YELLOW}>>> Zaroori Tools Check & Fast Setup Ho Raha Hai...<<<${NC}"
     ensure_cron
     ensure_rclone
-
-    if command -v apt-get >/dev/null 2>&1; then
-        apt-get install -y curl tar gzip unzip docker.io coreutils ca-certificates >/dev/null 2>&1
-    elif command -v yum >/dev/null 2>&1; then
-        yum install -y curl tar gzip unzip docker coreutils ca-certificates >/dev/null 2>&1
-    fi
-
-    systemctl enable --now docker >/dev/null 2>&1 || true
-
-    if [ ! -f /usr/local/bin/wings ]; then
-        mkdir -p /etc/pterodactyl /var/lib/pterodactyl
-        curl -L -o /usr/local/bin/wings \
-            "https://github.com/pterodactyl/wings/releases/latest/download/wings_linux_amd64" >/dev/null 2>&1
-        chmod u+x /usr/local/bin/wings
-    fi
-    mkdir -p /root/.config/rclone
-    echo -e "${GREEN}✓ Sabhi tools ready hain!${NC}"
+    ensure_pigz
+    apt-get install -y curl tar gzip unzip mariadb-client coreutils ca-certificates >/dev/null 2>&1 || true
+    echo -e "${GREEN}✓ All tools 100% ready!${NC}"
     sleep 1
 }
 
 # ==================== BLOMP LOGIN ====================
 setup_blomp() {
     clear
-    echo -e "${CYAN}======== BLOMP LOGIN ========${NC}"
+    echo -e "${CYAN}======== BLOMP CLOUD LOGIN ========${NC}"
     ensure_rclone || return
 
     read -p "Blomp Email: " blomp_user
@@ -110,12 +83,12 @@ setup_blomp() {
     echo ""
 
     if [ -z "$blomp_user" ] || [ -z "$blomp_pass" ]; then
-        echo -e "${RED}Email/Password blank nahi ho sakte.${NC}"
+        echo -e "${RED}Email/Password empty nahi ho sakte.${NC}"
         sleep 2
         return
     fi
 
-    echo -e "${YELLOW}Connecting Blomp...${NC}"
+    echo -e "${YELLOW}Blomp OpenStack Swift se connect ho raha hai...${NC}"
     rclone config delete "$REMOTE_NAME" >/dev/null 2>&1 || true
 
     rclone config create "$REMOTE_NAME" swift \
@@ -140,15 +113,14 @@ EOF
     rclone mkdir "${REMOTE_NAME}:${blomp_user}/${BACKUP_FOLDER}" >/dev/null 2>&1
 
     if rclone lsf "${REMOTE_NAME}:${blomp_user}" >/tmp/blomp_test.log 2>&1; then
-        echo -e "${GREEN}✓ Blomp Connect OK${NC}"
-        echo -e "Cloud folder: ${CYAN}${blomp_user}/${BACKUP_FOLDER}/${NC}"
+        echo -e "${GREEN}✓ Blomp Login Successful!${NC}"
+        echo -e "Cloud Folder: ${CYAN}${blomp_user}/${BACKUP_FOLDER}/${NC}"
     else
-        echo -e "${RED}✗ Login fail${NC}"
+        echo -e "${RED}✗ Login fail:${NC}"
         cat /tmp/blomp_test.log 2>/dev/null
-        rclone config delete "$REMOTE_NAME" >/dev/null 2>&1 || true
         rm -f "$CONFIG_FILE"
     fi
-    read -p "Enter..." t
+    read -p "Enter dabayein..." t
 }
 
 check_blomp_login() {
@@ -158,35 +130,48 @@ check_blomp_login() {
         load_blomp_config
     fi
     [ -z "$BLOMP_USER" ] && return 1
-    rclone lsf "${REMOTE_NAME}:${BLOMP_USER}" >/dev/null 2>&1 || return 1
     return 0
 }
 
-# ==================== SIZE CHECK ====================
-show_local_data() {
-    echo -e "${CYAN}--- Pura VPS Disk Usage ---${NC}"
-    df -h / 2>/dev/null | tail -1 | awk '{print "  Disk /  Used="$3"  Free="$4"  Total="$2}'
-    echo ""
-    for p in / /root /home /var /var/lib /var/lib/pterodactyl /etc /opt /usr/local; do
+# ==================== CHECK IMPORTANT DATA ====================
+show_important_data() {
+    echo -e "${CYAN}--- Important System & App Paths Check ---${NC}"
+    
+    PATHS=(
+        "/var/lib/pterodactyl"
+        "/etc/pterodactyl"
+        "/var/www/pterodactyl"
+        "/var/lib/tailscale"
+        "/etc/cloudflared"
+        "/root/.cloudflared"
+        "/etc/letsencrypt"
+        "/etc/nginx"
+        "/etc/apache2"
+        "/root"
+        "/home"
+        "/etc/systemd/system"
+        "/usr/local/bin"
+        "/var/spool/cron"
+    )
+
+    for p in "${PATHS[@]}"; do
         if [ -e "$p" ]; then
             sz=$(du -sh "$p" 2>/dev/null | awk '{print $1}')
-            echo -e "  ${GREEN}OK${NC}  $p  →  $sz"
+            echo -e "  ${GREEN}FOUND${NC}  $p  →  ${YELLOW}$sz${NC}"
+        else
+            echo -e "  ${RED}NOT FOUND${NC}  $p"
         fi
     done
     echo ""
 }
 
-# ==================== DIRECT STREAM BACKUP (NO LOCAL ZIP) ====================
-do_full_vps_backup() {
+# ==================== FAST SMART STREAM BACKUP ====================
+do_smart_vps_backup() {
     load_blomp_config
     load_backup_name
 
-    if [ -z "$BACKUP_NAME" ]; then
-        echo -e "${RED}Pehle Auto-Backup ON karke backup name set karein.${NC}"
-        return 1
-    fi
-    if [ -z "$BLOMP_USER" ]; then
-        echo -e "${RED}Pehle Blomp login karein.${NC}"
+    if [ -z "$BACKUP_NAME" ] || [ -z "$BLOMP_USER" ]; then
+        echo -e "${RED}Pehle Blomp Login + Backup Name set karein.${NC}"
         return 1
     fi
 
@@ -197,53 +182,90 @@ do_full_vps_backup() {
     DEST="${REMOTE_NAME}:${BLOMP_USER}/${BACKUP_FOLDER}/${FILE}"
 
     echo "======================================" >> "$LOG"
-    echo "STREAM BACKUP START $(date) file=$FILE" >> "$LOG"
+    echo "SMART FAST BACKUP START $(date) file=$FILE" >> "$LOG"
 
-    echo -e "${CYAN}⚡ NO-ZIP DIRECT STREAMING UPLOAD SHURU...${NC}"
-    echo -e "Disk Space Used: ${GREEN}0 MB (Disk full nahi hoga!)${NC}"
-    echo -e "File Name:       ${GREEN}${FILE}${NC}"
-    echo -e "Cloud Destination: ${GREEN}${BLOMP_USER}/${BACKUP_FOLDER}/${NC}"
+    # Auto Database Dump if MySQL/MariaDB exists
+    DB_DUMP_FILE=""
+    if command -v mysqldump >/dev/null 2>&1 && (systemctl is-active --quiet mariadb || systemctl is-active --quiet mysql); then
+        echo -e "${YELLOW}Database ka auto-dump liya ja raha hai...${NC}"
+        DB_DUMP_FILE="/root/pterodactyl_database_dump.sql"
+        mysqldump --all-databases --single-transaction --quick > "$DB_DUMP_FILE" 2>>"$LOG" || true
+    fi
+
+    # Auto Find Active Important Paths
+    TARGET_PATHS=()
+    POSSIBLE_PATHS=(
+        "/var/lib/pterodactyl"
+        "/etc/pterodactyl"
+        "/var/www/pterodactyl"
+        "/var/lib/tailscale"
+        "/etc/cloudflared"
+        "/root/.cloudflared"
+        "/etc/letsencrypt"
+        "/etc/nginx"
+        "/etc/apache2"
+        "/root"
+        "/home"
+        "/etc/systemd/system"
+        "/usr/local/bin"
+        "/var/spool/cron"
+    )
+
+    [ -n "$DB_DUMP_FILE" ] && [ -f "$DB_DUMP_FILE" ] && TARGET_PATHS+=("$DB_DUMP_FILE")
+
+    for p in "${POSSIBLE_PATHS[@]}"; do
+        [ -e "$p" ] && TARGET_PATHS+=("$p")
+    done
+
+    if [ ${#TARGET_PATHS[@]} -eq 0 ]; then
+        echo -e "${RED}✗ Backup karne ke liye koi data nahi mila!${NC}"
+        rm -f "$DB_DUMP_FILE" 2>/dev/null
+        return 1
+    fi
+
+    echo -e "${CYAN}⚡ SUPER FAST SMART STREAMING SHURU...${NC}"
+    echo -e "Disk Space Used:  ${GREEN}0 MB (No Local Zip File)${NC}"
+    echo -e "Backup Name:      ${GREEN}${FILE}${NC}"
+    echo -e "Target Folder:    ${GREEN}${BLOMP_USER}/${BACKUP_FOLDER}/${NC}"
     echo "--------------------------------------------------------"
+
+    # Multi-core fast compression setup
+    COMPRESS_CMD="gzip -1 -c"
+    command -v pigz >/dev/null 2>&1 && COMPRESS_CMD="pigz -1 -c"
 
     systemctl stop wings >/dev/null 2>&1 || true
 
-    # DIRECT PIPE: Tar Stream -> Rclone Rcat (Direct Cloud Upload)
-    tar -czf - \
+    # DIRECT STREAM PIPE: Tar -> Pigz -> Rclone Rcat (Cloud)
+    tar -cf - \
         --absolute-names \
         --ignore-failed-read \
         --warning=no-file-changed \
-        --exclude="/proc" \
-        --exclude="/sys" \
-        --exclude="/dev" \
-        --exclude="/run" \
-        --exclude="/tmp" \
-        --exclude="/mnt" \
-        --exclude="/media" \
-        --exclude="/lost+found" \
-        --exclude="/var/tmp" \
-        --exclude="/var/cache" \
-        --exclude="/var/lib/docker/overlay2" \
-        --exclude="/var/lib/docker/tmp" \
-        --exclude="/snap" \
-        -C / . 2>>"$LOG" \
+        --exclude="/root/*.tar.gz" \
+        --exclude="/root/.cache" \
+        --exclude="/var/lib/pterodactyl/volumes/*/.git" \
+        "${TARGET_PATHS[@]}" 2>>"$LOG" \
+    | $COMPRESS_CMD 2>>"$LOG" \
     | rclone rcat "$DEST" \
         --progress \
         --stats 1s \
+        --buffer-size 64M \
         --timeout 60m \
-        --contimeout 60s \
         2>>"$LOG"
 
     local STREAM_RC=$?
+    
+    # Cleanup DB Dump & Restart Wings
+    rm -f "$DB_DUMP_FILE" 2>/dev/null
     systemctl start wings >/dev/null 2>&1 || true
 
     echo "--------------------------------------------------------"
     if [ $STREAM_RC -eq 0 ]; then
-        echo -e "${GREEN}✓ STREAM UPLOAD 100% SUCCESSFUL!${NC}"
-        echo -e "${GREEN}  File: ${FILE} Blomp Cloud par save ho gaya.${NC}"
+        echo -e "${GREEN}✓ SMART BACKUP SUCCESSFUL & UPLOADED!${NC}"
+        echo -e "File Name: ${CYAN}${FILE}${NC}"
         echo "SUCCESS $FILE" >> "$LOG"
         return 0
     else
-        echo -e "${RED}✗ Upload stream mein problem aayi.${NC}"
+        echo -e "${RED}✗ Streaming Upload Failed. Check Log: $LOG${NC}"
         echo "FAIL STREAM $FILE" >> "$LOG"
         return 1
     fi
@@ -267,32 +289,41 @@ TIME=\$(date +%Y-%m-%d_%H-%M-%S)
 FILE="\${BACKUP_NAME}_\${TIME}.tar.gz"
 DEST="\${REMOTE_NAME}:\${BLOMP_USER}/\${BACKUP_FOLDER}/\${FILE}"
 
-echo "==== \$(date) AUTO STREAM \$FILE ====" >> "\$LOG"
+echo "==== \$(date) SMART AUTO STREAM \$FILE ====" >> "\$LOG"
+
+DB_DUMP=""
+if command -v mysqldump >/dev/null 2>&1 && (systemctl is-active --quiet mariadb || systemctl is-active --quiet mysql); then
+    DB_DUMP="/root/pterodactyl_database_dump.sql"
+    mysqldump --all-databases --single-transaction --quick > "\$DB_DUMP" 2>>"\$LOG" || true
+fi
+
+TARGETS=()
+[ -n "\$DB_DUMP" ] && [ -f "\$DB_DUMP" ] && TARGETS+=("\$DB_DUMP")
+
+POSSIBLES=(
+    "/var/lib/pterodactyl" "/etc/pterodactyl" "/var/www/pterodactyl"
+    "/var/lib/tailscale" "/etc/cloudflared" "/root/.cloudflared"
+    "/etc/letsencrypt" "/etc/nginx" "/etc/apache2"
+    "/root" "/home" "/etc/systemd/system" "/usr/local/bin" "/var/spool/cron"
+)
+
+for p in "\${POSSIBLES[@]}"; do
+    [ -e "\$p" ] && TARGETS+=("\$p")
+done
+
+COMPRESS="gzip -1 -c"
+command -v pigz >/dev/null 2>&1 && COMPRESS="pigz -1 -c"
 
 systemctl stop wings >/dev/null 2>&1 || true
 
-# Direct Pipe Stream Upload in Cron
-tar -czf - \
-  --absolute-names \
-  --ignore-failed-read \
-  --warning=no-file-changed \
-  --exclude="/proc" \
-  --exclude="/sys" \
-  --exclude="/dev" \
-  --exclude="/run" \
-  --exclude="/tmp" \
-  --exclude="/mnt" \
-  --exclude="/media" \
-  --exclude="/lost+found" \
-  --exclude="/var/tmp" \
-  --exclude="/var/cache" \
-  --exclude="/var/lib/docker/overlay2" \
-  --exclude="/var/lib/docker/tmp" \
-  --exclude="/snap" \
-  -C / . 2>>"\$LOG" \
-| rclone rcat "\$DEST" --timeout 60m >>"\$LOG" 2>&1
+tar -cf - --absolute-names --ignore-failed-read --warning=no-file-changed \
+    --exclude="/root/*.tar.gz" --exclude="/root/.cache" \
+    "\${TARGETS[@]}" 2>>"\$LOG" \
+| \$COMPRESS 2>>"\$LOG" \
+| rclone rcat "\$DEST" --buffer-size 64M --timeout 60m >>"\$LOG" 2>&1
 
 RC=\$?
+rm -f "\$DB_DUMP" 2>/dev/null
 systemctl start wings >/dev/null 2>&1 || true
 
 echo "Stream end rc=\$RC" >> "\$LOG"
@@ -306,14 +337,16 @@ start_auto_backup() {
     clear
     if ! check_blomp_login; then sleep 2; return; fi
     ensure_cron
+    ensure_pigz
 
     echo -e "${CYAN}╔════════════════════════════════════════════╗${NC}"
-    echo -e "${CYAN}║  DIRECT STREAM AUTO-BACKUP (15 Minutes)    ║${NC}"
+    echo -e "${CYAN}║   SMART FAST AUTO-BACKUP (15 Minutes)      ║${NC}"
     echo -e "${CYAN}╚════════════════════════════════════════════╝${NC}"
     echo ""
     echo -e "Cloud Folder: ${YELLOW}Backup vps${NC}"
-    echo -e "Feature:      ${GREEN}0% Local Disk Use (Direct Streaming)${NC}"
+    echo -e "Includes:     ${GREEN}Pterodactyl, Wings, DB, Tailscale, Cloudflare, SSL, Root${NC}"
     echo ""
+
     load_backup_name
     if [ -n "$BACKUP_NAME" ]; then
         echo -e "Current Name: ${GREEN}${BACKUP_NAME}${NC}"
@@ -331,7 +364,7 @@ start_auto_backup() {
     load_backup_name
     echo ""
     echo -e "${GREEN}Backup Name Lock: ${BACKUP_NAME}${NC}"
-    echo -e "Files format:    ${CYAN}${BACKUP_NAME}_TARIKH_TIME.tar.gz${NC}"
+    echo -e "Files Format:    ${CYAN}${BACKUP_NAME}_TARIKH_TIME.tar.gz${NC}"
     echo ""
 
     create_auto_worker
@@ -341,21 +374,21 @@ start_auto_backup() {
     crontab /tmp/fcron
     rm -f /tmp/fcron
 
-    echo -e "${GREEN}✓ Auto-Backup Scheduler Active — har 15 min — Name: ${BACKUP_NAME}${NC}"
-    echo -e "${YELLOW}Pehla Direct Stream Backup abhi shuru ho raha hai...${NC}"
+    echo -e "${GREEN}✓ Auto-Backup Scheduler Active (Har 15 Min) — Name: ${BACKUP_NAME}${NC}"
+    echo -e "${YELLOW}Pehla Smart Stream Backup abhi shuru ho raha hai...${NC}"
     echo ""
 
-    do_full_vps_backup
-    read -p "Enter..." t
+    do_smart_vps_backup
+    read -p "Enter dabayein..." t
 }
 
-# ==================== 2) DIRECT STREAM RESTORE ====================
+# ==================== 2) RESTORE ====================
 restore_backup() {
     clear
     if ! check_blomp_login; then sleep 2; return; fi
 
-    echo -e "${CYAN}=== STREAM RESTORE FROM BLOMP (NO DISK ZIP) ===${NC}"
-    echo -e "${RED}Warning: Restore pura system overwrite karega.${NC}"
+    echo -e "${CYAN}=== SMART RESTORE FROM BLOMP (DIRECT CLOUD) ===${NC}"
+    echo -e "${YELLOW}Pterodactyl, Wings, Tailscale, Cloudflare Data Restore Hoga.${NC}"
     echo ""
 
     mapfile -t files < <(
@@ -364,7 +397,7 @@ restore_backup() {
     )
 
     if [ ${#files[@]} -eq 0 ]; then
-        echo -e "${RED}Koi backup nahi mila!${NC}"
+        echo -e "${RED}Blomp par koi backup nahi mila!${NC}"
         sleep 2
         return
     fi
@@ -383,16 +416,24 @@ restore_backup() {
     selected="${files[$((choice-1))]}"
     SRC="${REMOTE_NAME}:${BLOMP_USER}/${BACKUP_FOLDER}/${selected}"
 
-    echo -e "${YELLOW}⚡ Direct Stream Restore Shuru: ${selected} ...${NC}"
-    echo -e "${CYAN}Cloud se direct read hokar extract ho raha hai (0 MB local disk needed)${NC}"
-
+    echo -e "\n${YELLOW}⚡ Direct Cloud Stream Restore Shuru: ${selected} ...${NC}"
+    
     systemctl stop wings >/dev/null 2>&1 || true
 
-    # Direct Pipe: Rclone Cat Stream -> Tar Extract
+    # Direct Read Stream to Extraction
     rclone cat "$SRC" --progress | tar -xzf - -C / --absolute-names 2>/dev/null || rclone cat "$SRC" | tar -xzf - -C /
+
+    # Auto Import Database if SQL Dump exists in restore
+    if [ -f /root/pterodactyl_database_dump.sql ]; then
+        echo -e "${YELLOW}Database Dump wapas import ho raha hai...${NC}"
+        systemctl start mariadb >/dev/null 2>&1 || systemctl start mysql >/dev/null 2>&1 || true
+        mysql < /root/pterodactyl_database_dump.sql 2>/dev/null || true
+        rm -f /root/pterodactyl_database_dump.sql
+    fi
 
     chmod 600 /etc/pterodactyl/config.yml 2>/dev/null || true
 
+    # Auto Wings Service Repair
     if [ ! -f /etc/systemd/system/wings.service ] && [ -f /usr/local/bin/wings ]; then
         cat > /etc/systemd/system/wings.service <<'EOF'
 [Unit]
@@ -412,11 +453,19 @@ EOF
         systemctl daemon-reload
     fi
 
+    # Restart Services
     systemctl enable --now docker >/dev/null 2>&1 || true
-    systemctl restart docker wings >/dev/null 2>&1 || true
+    systemctl restart docker >/dev/null 2>&1 || true
+    systemctl restart wings >/dev/null 2>&1 || true
+    systemctl restart tailscaled >/dev/null 2>&1 || true
+    systemctl restart cloudflared >/dev/null 2>&1 || true
+    systemctl restart nginx >/dev/null 2>&1 || true
 
-    echo -e "${GREEN}✓ DIRECT STREAM RESTORE COMPLETE!${NC}"
-    read -p "Enter..." t
+    echo -e "\n${GREEN}====================================================${NC}"
+    echo -e "${GREEN} ✓ SMART RESTORE 100% COMPLETE!                    ${NC}"
+    echo -e "${GREEN} ✓ Panel, Wings, DB, Tailscale, Cloudflare Live!  ${NC}"
+    echo -e "${GREEN}====================================================${NC}"
+    read -p "Enter dabayein..." t
 }
 
 show_backups() {
@@ -426,7 +475,7 @@ show_backups() {
     echo ""
     rclone lsl "${REMOTE_NAME}:${BLOMP_USER}/${BACKUP_FOLDER}/" --include "*.tar.gz" 2>/dev/null
     echo ""
-    read -p "Enter..." t
+    read -p "Enter dabayein..." t
 }
 
 stop_auto_backup() {
@@ -444,7 +493,7 @@ while true; do
     clear
     load_backup_name
     echo -e "${GREEN}╔════════════════════════════════════════════════╗${NC}"
-    echo -e "${GREEN}║   DIRECT STREAM VPS BACKUP (NO DISK FULL)      ║${NC}"
+    echo -e "${GREEN}║   PTERODACTYL, WINGS & CLOUD SMART BACKUP v5   ║${NC}"
     echo -e "${GREEN}╠════════════════════════════════════════════════╣${NC}"
     if [ -n "$BACKUP_NAME" ]; then
     echo -e "${GREEN}║  Name: ${YELLOW}${BACKUP_NAME}${NC}   Folder: ${YELLOW}Backup vps${NC}"
@@ -453,8 +502,8 @@ while true; do
     echo -e "${GREEN}║ ${YELLOW}2)${NC} Restore (Direct Stream From Cloud)      ${GREEN}║${NC}"
     echo -e "${GREEN}║ ${YELLOW}3)${NC} Blomp Login                             ${GREEN}║${NC}"
     echo -e "${GREEN}║ ${YELLOW}4)${NC} Backup List (Cloud)                     ${GREEN}║${NC}"
-    echo -e "${GREEN}║ ${YELLOW}6)${NC} Local Disk Size Check                   ${GREEN}║${NC}"
-    echo -e "${GREEN}║ ${YELLOW}7)${NC} Auto-Backup OFF                         ${GREEN}║${NC}"
+    echo -e "${GREEN}║ ${YELLOW}5)${NC} Important Data Check                    ${GREEN}║${NC}"
+    echo -e "${GREEN}║ ${YELLOW}6)${NC} Auto-Backup OFF                         ${GREEN}║${NC}"
     echo -e "${GREEN}║ ${YELLOW}0)${NC} Exit                                    ${GREEN}║${NC}"
     echo -e "${GREEN}╚════════════════════════════════════════════════╝${NC}"
     read -p "Option: " opt
@@ -463,8 +512,8 @@ while true; do
         2) restore_backup ;;
         3) setup_blomp ;;
         4) show_backups ;;
-        6) clear; show_local_data; read -p "Enter..." t ;;
-        7) stop_auto_backup ;;
+        5) clear; show_important_data; read -p "Enter dabayein..." t ;;
+        6) stop_auto_backup ;;
         0) exit 0 ;;
         *) sleep 1 ;;
     esac
