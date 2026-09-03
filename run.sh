@@ -27,7 +27,7 @@ install_all_dependencies() {
     echo -e "${GREEN}✓ Sabhi tools ready hain!${NC}\n"
 }
 
-# 1. Blomp Login Setup (100% FIXED)
+# 1. Blomp Login Setup (100% FIXED FOR BLOMP)
 setup_blomp() {
     echo -e "${CYAN}======================================${NC}"
     echo -e "${CYAN}      BLOMP CLOUD LOGIN SETUP         ${NC}"
@@ -41,13 +41,15 @@ setup_blomp() {
 
     mkdir -p ~/.config/rclone/
     
-    # Direct Exact Swift Config for Blomp
+    # Exact OpenStack Swift Config for Blomp (With Tenant parameter)
     cat <<EOF > ~/.config/rclone/rclone.conf
 [blomp]
 type = swift
+env_auth = false
 user = ${blomp_user}
 key = ${blomp_pass}
 auth = https://authenticate.blomp.com
+tenant = ${blomp_user}
 auth_version = 1
 EOF
 
@@ -61,11 +63,10 @@ EOF
         rclone mkdir blomp:FullServerBackup >/dev/null 2>&1
     else
         echo -e "${RED}======================================${NC}"
-        echo -e "${RED}✗ LOGIN FAIL! Error Detail Neeche Dekhein:${NC}"
+        echo -e "${RED}✗ LOGIN FAIL! Error Detail:${NC}"
         echo -e "${RED}======================================${NC}"
         rclone lsf blomp:
         echo -e "${YELLOW}--------------------------------------${NC}"
-        echo -e "${YELLOW}Note: Agar Blomp par Password badla hai ya Email galat hai to check karein.${NC}"
         rm -f ~/.config/rclone/rclone.conf
     fi
     echo ""
