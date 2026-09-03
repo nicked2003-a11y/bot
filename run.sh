@@ -18,7 +18,7 @@ install_all_dependencies() {
     systemctl start docker >/dev/null 2>&1
     systemctl enable docker >/dev/null 2>&1
 
-    # Wings install agar exist nahi karta
+    # Wings install
     if [ ! -f /usr/local/bin/wings ]; then
         mkdir -p /etc/pterodactyl /var/lib/pterodactyl
         curl -L -o /usr/local/bin/wings "https://github.com/pterodactyl/wings/releases/latest/download/wings_linux_amd64" >/dev/null 2>&1
@@ -27,31 +27,49 @@ install_all_dependencies() {
     echo -e "${GREEN}✓ Sabhi tools ready hain!${NC}\n"
 }
 
-# 1. Blomp Login Setup
+# 1. Blomp Login Setup (100% FIXED)
 setup_blomp() {
     echo -e "${CYAN}======================================${NC}"
     echo -e "${CYAN}      BLOMP CLOUD LOGIN SETUP         ${NC}"
     echo -e "${CYAN}======================================${NC}"
-    read -p "Blomp Email: " blomp_user < /dev/tty
-    read -s -p "Blomp Password: " blomp_pass < /dev/tty
+    
+    read -p "Blomp Registered Email: " blomp_user
+    read -p "Blomp Password: " blomp_pass
     echo ""
 
-    echo -e "${YELLOW}Blomp se Connect kiya ja raha hai...${NC}"
+    echo -e "${YELLOW}Configuring Blomp for Rclone...${NC}"
 
-    rclone config create blomp swift \
-        user "$blomp_user" \
-        key "$blomp_pass" \
-        auth "https://authenticate.blomp.com" \
-        tenant "$blomp_user" \
-        auth_version 1 >/dev/null 2>&1
+    mkdir -p ~/.config/rclone/
+    
+    # Direct Exact Swift Config for Blomp
+    cat <<EOF > ~/.config/rclone/rclone.conf
+[blomp]
+type = swift
+user = ${blomp_user}
+key = ${blomp_pass}
+auth = https://authenticate.blomp.com
+auth_version = 1
+EOF
 
-    if rclone mkdir blomp:FullServerBackup 2>/dev/null; then
-        echo -e "${GREEN}✓ SUCCESS: Blomp Cloud Connect ho gaya!${NC}"
+    echo -e "${YELLOW}Connection Test Ho Raha Hai...${NC}"
+    
+    # Test Connection
+    if rclone lsf blomp: >/dev/null 2>&1; then
+        echo -e "${GREEN}======================================${NC}"
+        echo -e "${GREEN}✓ SUCCESS: Blomp Cloud Connect Ho Gaya!${NC}"
+        echo -e "${GREEN}======================================${NC}"
+        rclone mkdir blomp:FullServerBackup >/dev/null 2>&1
     else
-        echo -e "${RED}✗ Login Failed! Email ya Password check karein.${NC}"
-        rclone config delete blomp >/dev/null 2>&1
+        echo -e "${RED}======================================${NC}"
+        echo -e "${RED}✗ LOGIN FAIL! Error Detail Neeche Dekhein:${NC}"
+        echo -e "${RED}======================================${NC}"
+        rclone lsf blomp:
+        echo -e "${YELLOW}--------------------------------------${NC}"
+        echo -e "${YELLOW}Note: Agar Blomp par Password badla hai ya Email galat hai to check karein.${NC}"
+        rm -f ~/.config/rclone/rclone.conf
     fi
-    sleep 2
+    echo ""
+    read -p "Enter dabayein Continue karne ke liye..." temp
 }
 
 # Check Blomp Login Status
@@ -74,37 +92,31 @@ start_auto_backup() {
     echo -e "${CYAN}   FULL AUTO BACKUP SETUP (Har 15 Min) ${NC}"
     echo -e "${CYAN}======================================${NC}"
 
-    # Script for complete backup
     cat << 'EOF' > /root/do_full_backup.sh
 #!/bin/bash
 TIME=$(date +%Y-%m-%d_%H-%M)
 FILE="FULL_BACKUP_${TIME}.tar.gz"
 
-# Pack EVERYTHING: Servers, Configs, SSL Certs
-tar -czf "/root/${FILE}" \
-    /var/lib/pterodactyl \
-    /etc/pterodactyl \
-    /etc/letsencrypt \
-    2>/dev/null
+# Pack EVERYTHING
+tar -czf "/root/${FILE}" /var/lib/pterodactyl /etc/pterodactyl /etc/letsencrypt 2>/dev/null
 
-# Upload FULL backup to Blomp
+# Upload to Blomp
 rclone copy "/root/${FILE}" blomp:FullServerBackup/
 
-# Delete local copy to save VPS Disk Space
+# Delete local copy
 rm -f "/root/${FILE}"
 EOF
 
     chmod +x /root/do_full_backup.sh
 
-    # Setup 15-min cron
     crontab -l 2>/dev/null | grep -v "do_full_backup" | crontab -
     (crontab -l 2>/dev/null; echo "*/15 * * * * /root/do_full_backup.sh >/dev/null 2>&1") | crontab -
 
-    echo -e "${GREEN}✓ FULL Auto Backup Scheduler Active ho gaya (Har 15 min).${NC}"
-    echo -e "${YELLOW}Pehla Full Backup abhi lia ja raha hai (Heavy Data hai, Thoda Wait Karein)...${NC}"
+    echo -e "${GREEN}✓ FULL Auto Backup Active (Har 15 min).${NC}"
+    echo -e "${YELLOW}Pehla Full Backup abhi lia ja raha hai...${NC}"
     /root/do_full_backup.sh
-    echo -e "${GREEN}✓ Full Backup Blomp Cloud par successfully Upload ho gaya!${NC}"
-    sleep 3
+    echo -e "${GREEN}✓ Full Backup Blomp par successfully Upload ho gaya!${NC}"
+    sleep 2
 }
 
 # 3. Full Restore Backup from List
@@ -118,51 +130,44 @@ restore_backup() {
     echo -e "${CYAN}======================================${NC}"
     echo -e "${CYAN}   FULL SYSTEM RESTORE FROM BLOMP     ${NC}"
     echo -e "${CYAN}======================================${NC}"
-    echo -e "${YELLOW}Blomp Cloud se FULL Backups ki list aa rahi hai...${NC}"
+    echo -e "${YELLOW}Backups list load ho rahi hai...${NC}"
 
     mapfile -t files < <(rclone lsf blomp:FullServerBackup/ --include "*.tar.gz" 2>/dev/null)
 
     if [ ${#files[@]} -eq 0 ]; then
         echo -e "${RED}✗ Blomp Cloud par koi backup nahi mila!${NC}"
-        echo -e "${YELLOW}Pehle Option 1 se Auto-Backup ON karein.${NC}"
-        sleep 3
+        sleep 2
         return
     fi
 
-    echo -e "${GREEN}Mile hue Full Backups:${NC}"
+    echo -e "${GREEN}Mile hue Backups:${NC}"
     echo "--------------------------------------------------------"
     for i in "${!files[@]}"; do
         echo -e "${YELLOW}$((i+1)))${NC} ${files[$i]}"
     done
     echo "--------------------------------------------------------"
     
-    read -p "Konsa FULL Backup Restore karna hai? [1-${#files[@]}]: " choice < /dev/tty
+    read -p "Konsa Backup Restore karna hai? [1-${#files[@]}]: " choice
 
     if [[ "$choice" -ge 1 && "$choice" -le "${#files[@]}" ]] 2>/dev/null; then
         selected="${files[$((choice-1))]}"
-        echo -e "\n${YELLOW}Downloading Heavy Data: ${selected} ... (Wait karein)${NC}"
+        echo -e "\n${YELLOW}Downloading: ${selected} ...${NC}"
         rclone copy "blomp:FullServerBackup/${selected}" /root/
 
-        echo -e "${YELLOW}100% System Extract & Restore Ho Raha Hai...${NC}"
+        echo -e "${YELLOW}Extracting & Restoring...${NC}"
         tar -xzf "/root/${selected}" -C / 2>/dev/null
         rm -f "/root/${selected}"
 
-        # Restarting Docker and Wings Services
         systemctl restart docker >/dev/null 2>&1
         systemctl restart wings >/dev/null 2>&1
 
-        # Automatically start auto-backup process on new VPS too
-        start_auto_backup
-
         echo -e "${GREEN}====================================================${NC}"
         echo -e "${GREEN}  ✓ FULL RESTORE SUCCESSFUL!                       ${NC}"
-        echo -e "${GREEN}  Saara Data, Servers, World, Plugins Wapas Aa Gaye!${NC}"
-        echo -e "${GREEN}  Wings Service Live ho chuki hai.                  ${NC}"
         echo -e "${GREEN}====================================================${NC}"
     else
         echo -e "${RED}Galat option chuna!${NC}"
     fi
-    sleep 3
+    sleep 2
 }
 
 # Main Execution Flow
@@ -180,7 +185,7 @@ while true; do
     echo -e "${GREEN}║  ${YELLOW}4)${NC} Exit                                          ║${NC}"
     echo -e "${GREEN}║                                                 ║${NC}"
     echo -e "${GREEN}╚═════════════════════════════════════════════════╝${NC}"
-    read -p "Option chunein [1-4]: " opt < /dev/tty
+    read -p "Option chunein [1-4]: " opt
 
     case $opt in
         1) start_auto_backup ;;
