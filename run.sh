@@ -8,7 +8,7 @@ NC='\033[0m'
 
 install_all_dependencies() {
     clear
-    echo -e "${YELLOW}>>> Tools install/check ho rahe hain...<<<${NC}"
+    echo -e "${YELLOW}>>> Tools Install / Check Ho Rahe Hain...<<<${NC}"
     apt-get update -y >/dev/null 2>&1
     apt-get install -y curl tar unzip rclone docker.io >/dev/null 2>&1
     systemctl start docker >/dev/null 2>&1
@@ -20,78 +20,95 @@ install_all_dependencies() {
             "https://github.com/pterodactyl/wings/releases/latest/download/wings_linux_amd64" >/dev/null 2>&1
         chmod u+x /usr/local/bin/wings
     fi
-    echo -e "${GREEN}✓ Tools ready${NC}\n"
+    echo -e "${GREEN}✓ Tools Ready!${NC}\n"
 }
 
-# ========== BLOMP LOGIN (SWIFT V1 FIXED) ==========
+# ========== BLOMP LOGIN (TRIPLE AUTO-RETRY FIX) ==========
 setup_blomp() {
     echo -e "${CYAN}======================================${NC}"
-    echo -e "${CYAN}   BLOMP CLOUD LOGIN (SWIFT V1)       ${NC}"
+    echo -e "${CYAN}      BLOMP CLOUD LOGIN SETUP         ${NC}"
     echo -e "${CYAN}======================================${NC}"
 
     read -p "Blomp Email: " blomp_user
     read -p "Blomp Password: " blomp_pass
     echo ""
 
-    echo -e "${YELLOW}Configuring Blomp Swift V1...${NC}"
     mkdir -p ~/.config/rclone
 
-    # Swift V1 Configuration (Blomp standard)
+    echo -e "${YELLOW}[Method 1/3] Testing Blomp Swift V1.0/ ...${NC}"
     cat > ~/.config/rclone/rclone.conf <<EOF
 [blomp]
 type = swift
 user = ${blomp_user}
 key = ${blomp_pass}
-auth = https://authenticate.blomp.com/v1.0
+auth = https://authenticate.blomp.com/v1.0/
 endpoint_type = public
 EOF
 
-    echo -e "${YELLOW}Connection test kiya ja raha hai...${NC}"
+    if rclone mkdir blomp:FullServerBackup 2>/null && rclone lsf blomp: >/dev/null 2>&1; then
+        echo -e "${GREEN}======================================${NC}"
+        echo -e "${GREEN}✓ SUCCESS: Method 1 Se Blomp Connect Ho Gaya!${NC}"
+        echo -e "${GREEN}======================================${NC}"
+        read -p "Enter dabayein Menu ke liye..." t
+        return
+    fi
 
-    # Test connection by listing or making a container
-    if rclone mkdir blomp:FullServerBackup 2>/tmp/blomp_err.log; then
-        echo -e "${GREEN}======================================${NC}"
-        echo -e "${GREEN}✓ SUCCESS: Blomp Cloud Connect Ho Gaya!${NC}"
-        echo -e "${GREEN}======================================${NC}"
-    else
-        echo -e "${RED}======================================${NC}"
-        echo -e "${RED}✗ LOGIN FAIL — Trying V2 Auth Fallback...${NC}"
-        
-        # Fallback to V2 if V1 fails
-        cat > ~/.config/rclone/rclone.conf <<EOF
+    echo -e "${YELLOW}[Method 2/3] Testing Blomp Swift With Tenant...${NC}"
+    cat > ~/.config/rclone/rclone.conf <<EOF
 [blomp]
 type = swift
 user = ${blomp_user}
 key = ${blomp_pass}
-auth = https://authenticate.blomp.com/v2.0
+auth = https://authenticate.blomp.com/v1.0/
+tenant = ${blomp_user}
+auth_version = 1
+endpoint_type = public
+EOF
+
+    if rclone mkdir blomp:FullServerBackup 2>/null && rclone lsf blomp: >/dev/null 2>&1; then
+        echo -e "${GREEN}======================================${NC}"
+        echo -e "${GREEN}✓ SUCCESS: Method 2 Se Blomp Connect Ho Gaya!${NC}"
+        echo -e "${GREEN}======================================${NC}"
+        read -p "Enter dabayein Menu ke liye..." t
+        return
+    fi
+
+    echo -e "${YELLOW}[Method 3/3] Testing Blomp Swift V2.0/ ...${NC}"
+    cat > ~/.config/rclone/rclone.conf <<EOF
+[blomp]
+type = swift
+user = ${blomp_user}
+key = ${blomp_pass}
+auth = https://authenticate.blomp.com/v2.0/
 tenant = ${blomp_user}
 auth_version = 2
 endpoint_type = public
 EOF
 
-        if rclone mkdir blomp:FullServerBackup 2>>/tmp/blomp_err.log; then
-             echo -e "${GREEN}✓ SUCCESS (with V2 Auth)!${NC}"
-        else
-             echo -e "${RED}======================================${NC}"
-             echo -e "${RED}✗ FINAL LOGIN FAIL — Error detail:${NC}"
-             cat /tmp/blomp_err.log
-             echo -e "${YELLOW}Check: Dashboard par login ho raha hai?${NC}"
-             rm -f ~/.config/rclone/rclone.conf
-        fi
+    if rclone mkdir blomp:FullServerBackup 2>/null && rclone lsf blomp: >/dev/null 2>&1; then
+        echo -e "${GREEN}======================================${NC}"
+        echo -e "${GREEN}✓ SUCCESS: Method 3 Se Blomp Connect Ho Gaya!${NC}"
+        echo -e "${GREEN}======================================${NC}"
+        read -p "Enter dabayein Menu ke liye..." t
+        return
     fi
 
-    echo ""
-    read -p "Enter dabayein menu ke liye..." t
+    echo -e "${RED}======================================${NC}"
+    echo -e "${RED}✗ LOGIN FAIL!<sup></sup>${NC}"
+    echo -e "${RED}======================================${NC}"
+    echo -e "${YELLOW}Please check: Kya Blomp Dashboard par browser se login ho raha hai?${NC}"
+    rm -f ~/.config/rclone/rclone.conf
+    read -p "Enter dabayein Menu ke liye..." t
 }
 
 check_blomp_login() {
     if ! rclone listremotes 2>/dev/null | grep -q "blomp:"; then
-        echo -e "${YELLOW}Pehle Blomp login zaroori hai${NC}"
+        echo -e "${YELLOW}Pehle Blomp Login Karna Zaroori Hai${NC}"
         setup_blomp
     fi
 }
 
-# ========== FULL AUTO BACKUP ==========
+# ========== FULL AUTO BACKUP (15 MIN) ==========
 start_auto_backup() {
     check_blomp_login
     if ! rclone listremotes 2>/dev/null | grep -q "blomp:"; then
@@ -113,10 +130,10 @@ EOF
     crontab -l 2>/dev/null | grep -v "do_full_backup" | crontab -
     (crontab -l 2>/dev/null; echo "*/15 * * * * /root/do_full_backup.sh >/dev/null 2>&1") | crontab -
 
-    echo -e "${GREEN}✓ Scheduler ON${NC}"
-    echo -e "${YELLOW}Pehla backup shuru...${NC}"
+    echo -e "${GREEN}✓ Auto-Backup Scheduler Active (Har 15 Min)${NC}"
+    echo -e "${YELLOW}Pehla Full Backup Upload Ho Raha Hai...${NC}"
     /root/do_full_backup.sh
-    echo -e "${GREEN}✓ Process Done.${NC}"
+    echo -e "${GREEN}✓ Upload Complete!${NC}"
     sleep 2
 }
 
@@ -127,31 +144,41 @@ restore_backup() {
         return
     fi
 
-    echo -e "${CYAN}=== FULL SYSTEM RESTORE ===${NC}"
-    echo -e "${YELLOW}Loading list...${NC}"
+    echo -e "${CYAN}=== FULL SYSTEM RESTORE FROM BLOMP ===${NC}"
+    echo -e "${YELLOW}Backups ki list load ho rahi hai...${NC}"
 
     mapfile -t files < <(rclone lsf blomp:FullServerBackup/ --include "*.tar.gz" 2>/dev/null)
 
     if [ ${#files[@]} -eq 0 ]; then
-        echo -e "${RED}✗ Backup nahi mila!${NC}"
+        echo -e "${RED}✗ Blomp Cloud par koi backup nahi mila!${NC}"
         sleep 2
         return
     fi
 
-    echo -e "${GREEN}Mile hue Backups:${NC}"
+    echo -e "${GREEN}Available Backups:${NC}"
+    echo "--------------------------------------------------------"
     for i in "${!files[@]}"; do
         echo -e "${YELLOW}$((i+1)))${NC} ${files[$i]}"
     done
+    echo "--------------------------------------------------------"
 
-    read -p "Number chunein: " choice
+    read -p "Konsa backup restore karna hai? [1-${#files[@]}]: " choice
+
     if [[ "$choice" -ge 1 && "$choice" -le "${#files[@]}" ]] 2>/dev/null; then
         selected="${files[$((choice-1))]}"
-        echo -e "${YELLOW}Downloading: ${selected}${NC}"
+        echo -e "${YELLOW}Downloading: ${selected} ...${NC}"
         rclone copy "blomp:FullServerBackup/${selected}" /root/
+
+        echo -e "${YELLOW}Extracting & Restoring...${NC}"
         tar -xzf "/root/${selected}" -C / 2>/dev/null
         rm -f "/root/${selected}"
-        systemctl restart docker wings >/dev/null 2>&1
-        echo -e "${GREEN}✓ RESTORE SUCCESSFUL!${NC}"
+
+        systemctl restart docker >/dev/null 2>&1
+        systemctl restart wings >/dev/null 2>&1
+
+        echo -e "${GREEN}====================================================${NC}"
+        echo -e "${GREEN}  ✓ RESTORE SUCCESSFUL! Server & Wings Online!    ${NC}"
+        echo -e "${GREEN}====================================================${NC}"
     else
         echo -e "${RED}Galat option!${NC}"
     fi
@@ -164,7 +191,7 @@ install_all_dependencies
 while true; do
     clear
     echo -e "${GREEN}╔═════════════════════════════════════════════════╗${NC}"
-    echo -e "${GREEN}║   PTERODACTYL FULL CLOUD MANAGER (SWIFT FIX)    ║${NC}"
+    echo -e "${GREEN}║   PTERODACTYL FULL CLOUD MANAGER (FIXED v4)     ║${NC}"
     echo -e "${GREEN}╠═════════════════════════════════════════════════╣${NC}"
     echo -e "${GREEN}║  ${YELLOW}1)${NC} FULL Auto-Backup ON (Har 15 Min)           ${GREEN}║${NC}"
     echo -e "${GREEN}║  ${YELLOW}2)${NC} FULL Restore (1, 2, 3 List Se Choose)     ${GREEN}║${NC}"
@@ -178,6 +205,6 @@ while true; do
         2) restore_backup ;;
         3) setup_blomp ;;
         4) exit 0 ;;
-        *) echo -e "${RED}Invalid!${NC}"; sleep 1 ;;
+        *) echo -e "${RED}Sahi number daalein!${NC}"; sleep 1 ;;
     esac
 done
