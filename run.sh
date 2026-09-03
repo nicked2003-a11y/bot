@@ -1,5 +1,6 @@
 #!/bin/bash
 
+# Colors
 GREEN='\033[0;32m'
 CYAN='\033[0;36m'
 RED='\033[0;31m'
@@ -44,6 +45,7 @@ install_all_dependencies() {
         rclone \
         docker.io \
         cron \
+        coreutils \
         ca-certificates >/dev/null 2>&1
 
     systemctl enable --now docker >/dev/null 2>&1
@@ -51,10 +53,9 @@ install_all_dependencies() {
 
     # Wings install if missing
     if [ ! -f /usr/local/bin/wings ]; then
-        mkdir -p /etc/pterodactyl
-        mkdir -p /var/lib/pterodactyl
+        mkdir -p /etc/pterodactyl /var/lib/pterodactyl
 
-        echo -e "${YELLOW}Pterodactyl Wings download ho raha hai...${NC}"
+        echo -e "${YELLOW}Pterodactyl Wings binary install ho rahi hai...${NC}"
 
         curl -L \
             -o /usr/local/bin/wings \
@@ -66,12 +67,12 @@ install_all_dependencies() {
 
     mkdir -p /root/.config/rclone
 
-    echo -e "${GREEN}✓ Sabhi tools ready hain!${NC}"
+    echo -e "${GREEN}✓ Sabhi tools 100% ready hain!${NC}"
     sleep 1
 }
 
 # ============================================
-# 1. BLOMP LOGIN / SETUP
+# 1. BLOMP LOGIN / SETUP (WORKING FIX)
 # ============================================
 setup_blomp() {
     clear
@@ -81,8 +82,7 @@ setup_blomp() {
     echo -e "${CYAN}==========================================${NC}"
     echo ""
 
-    read -p "Blomp Email: " blomp_user
-
+    read -p "Blomp Registered Email: " blomp_user
     read -s -p "Blomp Password: " blomp_pass
     echo ""
     echo ""
@@ -93,12 +93,12 @@ setup_blomp() {
         return
     fi
 
-    echo -e "${YELLOW}Blomp OpenStack Swift se connect kiya ja raha hai...${NC}"
+    echo -e "${YELLOW}Blomp OpenStack Swift (ain.net) se connect kiya ja raha hai...${NC}"
 
     # Delete old remote
     rclone config delete "$REMOTE_NAME" >/dev/null 2>&1 || true
 
-    # Create Blomp Swift Remote
+    # Create Working Blomp Swift Remote
     rclone config create "$REMOTE_NAME" swift \
         env_auth=false \
         user="$blomp_user" \
@@ -122,9 +122,10 @@ EOF
 
     echo -e "${YELLOW}Connection test ho raha hai...${NC}"
 
-    # Blomp Swift container is normally account email
-    if rclone lsf "${REMOTE_NAME}:${blomp_user}" \
-        >/tmp/blomp_test.log 2>&1; then
+    # Container directory test
+    rclone mkdir "${REMOTE_NAME}:${blomp_user}/${BACKUP_FOLDER}" >/dev/null 2>&1
+
+    if rclone lsf "${REMOTE_NAME}:${blomp_user}" >/tmp/blomp_test.log 2>&1; then
 
         echo ""
         echo -e "${GREEN}==========================================${NC}"
@@ -132,12 +133,8 @@ EOF
         echo -e "${GREEN}==========================================${NC}"
 
         echo ""
-        echo -e "${CYAN}Cloud Container:${NC}"
-        echo "$blomp_user"
-
-        echo ""
-        echo -e "${CYAN}Backup Location:${NC}"
-        echo "${blomp_user}/${BACKUP_FOLDER}/"
+        echo -e "${CYAN}Cloud Account:${NC} $blomp_user"
+        echo -e "${CYAN}Backup Location:${NC} ${blomp_user}/${BACKUP_FOLDER}/"
 
     else
 
@@ -164,12 +161,9 @@ check_blomp_login() {
     load_blomp_config
 
     if ! rclone listremotes 2>/dev/null | grep -q "^${REMOTE_NAME}:$"; then
-
         echo -e "${YELLOW}Pehle Blomp Login Karna Zaroori Hai!${NC}"
-
         sleep 1
         setup_blomp
-
         load_blomp_config
     fi
 
@@ -177,9 +171,7 @@ check_blomp_login() {
         return 1
     fi
 
-    if ! rclone lsf "${REMOTE_NAME}:${BLOMP_USER}" \
-        >/dev/null 2>&1; then
-
+    if ! rclone lsf "${REMOTE_NAME}:${BLOMP_USER}" >/dev/null 2>&1; then
         echo -e "${RED}Blomp connection available nahi hai.${NC}"
         return 1
     fi
@@ -188,33 +180,27 @@ check_blomp_login() {
 }
 
 # ============================================
-# CREATE BACKUP SCRIPT
+# CREATE BACKUP WORKER SCRIPT
 # ============================================
 create_backup_worker() {
-
     load_blomp_config
 
     cat > /root/do_full_backup.sh <<EOF
 #!/bin/bash
+
+export PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin
 
 REMOTE_NAME="${REMOTE_NAME}"
 BLOMP_USER="${BLOMP_USER}"
 BACKUP_FOLDER="${BACKUP_FOLDER}"
 
 TIME=\$(date +%Y-%m-%d_%H-%M-%S)
-
 FILE="FULL_BACKUP_\${TIME}.tar.gz"
-
 LOCAL_FILE="/root/\${FILE}"
-
 LOG="/var/log/fakecloud-backup.log"
 
 echo "======================================" >> "\$LOG"
 echo "Backup Started: \$(date)" >> "\$LOG"
-
-# --------------------------------------------
-# Create archive
-# --------------------------------------------
 
 BACKUP_PATHS=""
 
@@ -246,12 +232,7 @@ if [ \$? -ne 0 ]; then
 fi
 
 SIZE=\$(du -h "\$LOCAL_FILE" | cut -f1)
-
 echo "Backup Size: \$SIZE" >> "\$LOG"
-
-# --------------------------------------------
-# Upload to Blomp
-# --------------------------------------------
 
 echo "Uploading to Blomp..." >> "\$LOG"
 
@@ -262,25 +243,16 @@ rclone copy \
     --low-level-retries 10 \
     --timeout 10m \
     --contimeout 60s \
-    --stats 30s \
     >> "\$LOG" 2>&1
 
 RESULT=\$?
 
 if [ \$RESULT -eq 0 ]; then
-
     echo "SUCCESS: \${FILE}" >> "\$LOG"
-
     rm -f "\$LOCAL_FILE"
-
     exit 0
-
 else
-
     echo "ERROR: Blomp upload failed." >> "\$LOG"
-
-    echo "Local backup retained: \$LOCAL_FILE" >> "\$LOG"
-
     exit 1
 fi
 EOF
@@ -292,7 +264,6 @@ EOF
 # 2. AUTO BACKUP EVERY 15 MINUTES
 # ============================================
 start_auto_backup() {
-
     clear
 
     if ! check_blomp_login; then
@@ -307,43 +278,29 @@ start_auto_backup() {
 
     create_backup_worker
 
-    # Remove old cron entry
-    crontab -l 2>/dev/null \
-        | grep -v "/root/do_full_backup.sh" \
-        > /tmp/fakecloud_cron || true
-
-    echo "*/15 * * * * /root/do_full_backup.sh >/dev/null 2>&1" \
-        >> /tmp/fakecloud_cron
-
+    crontab -l 2>/dev/null | grep -v "/root/do_full_backup.sh" > /tmp/fakecloud_cron || true
+    echo "*/15 * * * * /bin/bash /root/do_full_backup.sh >/dev/null 2>&1" >> /tmp/fakecloud_cron
     crontab /tmp/fakecloud_cron
-
     rm -f /tmp/fakecloud_cron
 
     echo -e "${GREEN}✓ Auto Backup Scheduler Active${NC}"
     echo -e "${GREEN}✓ Backup Interval: Har 15 Minute${NC}"
 
     echo ""
-    echo -e "${YELLOW}Pehla backup abhi create aur upload ho raha hai...${NC}"
+    echo -e "${YELLOW}Pehla backup abhi create aur upload ho raha hai (Wait karein)...${NC}"
     echo ""
 
     if /root/do_full_backup.sh; then
-
         echo ""
         echo -e "${GREEN}==========================================${NC}"
         echo -e "${GREEN}✓ BACKUP SUCCESSFULLY BLOMP PAR UPLOAD!${NC}"
         echo -e "${GREEN}==========================================${NC}"
-
     else
-
         echo ""
         echo -e "${RED}==========================================${NC}"
         echo -e "${RED}✗ BACKUP FAILED${NC}"
         echo -e "${RED}==========================================${NC}"
-
-        echo ""
-        echo "Log check karein:"
-        echo "cat /var/log/fakecloud-backup.log"
-
+        echo "Check Logs: cat /var/log/fakecloud-backup.log"
     fi
 
     echo ""
@@ -354,7 +311,6 @@ start_auto_backup() {
 # 3. LIST + RESTORE BACKUP
 # ============================================
 restore_backup() {
-
     clear
 
     if ! check_blomp_login; then
@@ -380,21 +336,16 @@ restore_backup() {
     )
 
     if [ ${#files[@]} -eq 0 ]; then
-
         echo -e "${RED}✗ Blomp Cloud par koi backup nahi mila!${NC}"
-
         sleep 2
         return
     fi
 
     echo -e "${GREEN}Available Backups:${NC}"
-
     echo "------------------------------------------------------------"
 
     for i in "${!files[@]}"; do
-
         FILE_NAME="${files[$i]}"
-
         SIZE=$(rclone size \
             "${REMOTE_NAME}:${BLOMP_USER}/${BACKUP_FOLDER}/${FILE_NAME}" \
             --json 2>/dev/null \
@@ -402,13 +353,12 @@ restore_backup() {
             | cut -d':' -f2)
 
         if [ -n "$SIZE" ]; then
-            HUMAN_SIZE=$(numfmt --to=iec "$SIZE" 2>/dev/null)
+            HUMAN_SIZE=$(numfmt --to=iec "$SIZE" 2>/dev/null || echo "$SIZE Bytes")
         else
             HUMAN_SIZE="Unknown"
         fi
 
         echo -e "${YELLOW}$((i+1)))${NC} ${FILE_NAME} (${HUMAN_SIZE})"
-
     done
 
     echo "------------------------------------------------------------"
@@ -416,31 +366,21 @@ restore_backup() {
 
     read -p "Konsa backup restore karna hai? [1-${#files[@]}] (0 Back): " choice
 
-    if [ "$choice" = "0" ]; then
+    if [ "$choice" = "0" ] || [ -z "$choice" ]; then
         return
     fi
 
-    if ! [[ "$choice" =~ ^[0-9]+$ ]]; then
-        echo -e "${RED}Galat option!${NC}"
-        sleep 2
-        return
-    fi
-
-    if [ "$choice" -lt 1 ] || [ "$choice" -gt "${#files[@]}" ]; then
+    if ! [[ "$choice" =~ ^[0-9]+$ ]] || [ "$choice" -lt 1 ] || [ "$choice" -gt "${#files[@]}" ]; then
         echo -e "${RED}Galat option!${NC}"
         sleep 2
         return
     fi
 
     selected="${files[$((choice-1))]}"
-
     LOCAL_FILE="/root/${selected}"
 
     echo ""
-    echo -e "${YELLOW}Selected:${NC}"
-    echo "$selected"
-
-    echo ""
+    echo -e "${YELLOW}Selected: ${selected}${NC}"
     echo -e "${YELLOW}Blomp se backup download ho raha hai...${NC}"
     echo ""
 
@@ -455,22 +395,17 @@ restore_backup() {
 
         echo ""
         echo -e "${RED}✗ Backup download FAILED!${NC}"
-
         rm -f "$LOCAL_FILE"
-
         read -p "Enter dabayein..." temp
         return
     fi
 
     echo ""
-    echo -e "${YELLOW}Backup verify kiya ja raha hai...${NC}"
+    echo -e "${YELLOW}Backup archive verify kiya ja raha hai...${NC}"
 
     if ! tar -tzf "$LOCAL_FILE" >/dev/null 2>&1; then
-
         echo -e "${RED}✗ Backup corrupt hai ya incomplete download hua.${NC}"
-
         rm -f "$LOCAL_FILE"
-
         read -p "Enter dabayein..." temp
         return
     fi
@@ -479,24 +414,18 @@ restore_backup() {
 
     echo ""
     echo -e "${YELLOW}Wings temporarily stop kiya ja raha hai...${NC}"
-
     systemctl stop wings >/dev/null 2>&1 || true
 
     echo -e "${YELLOW}Data restore ho raha hai...${NC}"
 
     if tar -xzf "$LOCAL_FILE" -C /; then
-
         rm -f "$LOCAL_FILE"
 
-        # Permissions
         chmod 600 /etc/pterodactyl/config.yml >/dev/null 2>&1 || true
-
-        # Docker
         systemctl enable --now docker >/dev/null 2>&1 || true
 
-        # Wings service create if missing
+        # Create Wings Service if missing
         if [ ! -f /etc/systemd/system/wings.service ]; then
-
             cat > /etc/systemd/system/wings.service <<'SERVICEEOF'
 [Unit]
 Description=Pterodactyl Wings Daemon
@@ -517,16 +446,12 @@ RestartSec=5s
 [Install]
 WantedBy=multi-user.target
 SERVICEEOF
-
         fi
 
         systemctl daemon-reload
-
         systemctl enable wings >/dev/null 2>&1 || true
         systemctl restart docker >/dev/null 2>&1 || true
-
         sleep 2
-
         systemctl restart wings >/dev/null 2>&1 || true
 
         echo ""
@@ -538,19 +463,13 @@ SERVICEEOF
         echo -e "${GREEN}====================================================${NC}"
 
         echo ""
-
         if systemctl is-active --quiet wings; then
-            echo -e "${GREEN}✓ Wings: RUNNING${NC}"
+            echo -e "${GREEN}✓ Wings: RUNNING (Online)${NC}"
         else
-            echo -e "${YELLOW}! Wings abhi running nahi hai.${NC}"
-            echo "Check:"
-            echo "journalctl -u wings -n 50 --no-pager"
+            echo -e "${YELLOW}! Wings abhi running nahi hai. Check: journalctl -u wings -n 50${NC}"
         fi
-
     else
-
         echo -e "${RED}✗ Restore ke time error aaya.${NC}"
-
     fi
 
     echo ""
@@ -561,7 +480,6 @@ SERVICEEOF
 # SHOW BLOMP BACKUPS
 # ============================================
 show_backups() {
-
     clear
 
     if ! check_blomp_login; then
@@ -587,25 +505,21 @@ show_backups() {
 # STOP AUTO BACKUP
 # ============================================
 stop_auto_backup() {
-
     crontab -l 2>/dev/null \
         | grep -v "/root/do_full_backup.sh" \
         | crontab -
 
     echo -e "${GREEN}✓ Auto Backup OFF kar diya gaya.${NC}"
-
     sleep 2
 }
 
 # ============================================
-# MAIN
+# MAIN LOOP
 # ============================================
-
 install_all_dependencies
 load_blomp_config
 
 while true; do
-
     clear
 
     echo -e "${GREEN}╔════════════════════════════════════════════════════╗${NC}"
@@ -620,40 +534,15 @@ while true; do
     echo -e "${GREEN}╚════════════════════════════════════════════════════╝${NC}"
 
     echo ""
-
     read -p "Option [0-5]: " opt
 
     case "$opt" in
-
-        1)
-            start_auto_backup
-            ;;
-
-        2)
-            restore_backup
-            ;;
-
-        3)
-            setup_blomp
-            ;;
-
-        4)
-            show_backups
-            ;;
-
-        5)
-            stop_auto_backup
-            ;;
-
-        0)
-            exit 0
-            ;;
-
-        *)
-            echo -e "${RED}Sahi number daalein!${NC}"
-            sleep 1
-            ;;
-
+        1) start_auto_backup ;;
+        2) restore_backup ;;
+        3) setup_blomp ;;
+        4) show_backups ;;
+        5) stop_auto_backup ;;
+        0) exit 0 ;;
+        *) echo -e "${RED}Sahi number daalein!${NC}"; sleep 1 ;;
     esac
-
 done
