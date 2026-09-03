@@ -27,7 +27,7 @@ install_all_dependencies() {
     echo -e "${GREEN}✓ Sabhi tools ready hain!${NC}\n"
 }
 
-# 1. Blomp Login Setup
+# 1. Blomp Login Setup (FIXED)
 setup_blomp() {
     echo -e "${CYAN}======================================${NC}"
     echo -e "${CYAN}      BLOMP CLOUD LOGIN SETUP         ${NC}"
@@ -36,31 +36,31 @@ setup_blomp() {
     read -s -p "Blomp Password: " blomp_pass < /dev/tty
     echo ""
 
-    mkdir -p ~/.config/rclone/
-    cat <<EOF > ~/.config/rclone/rclone.conf
-[blomp]
-type = swift
-env_auth = false
-user = ${blomp_user}
-key = ${blomp_pass}
-auth = https://authenticate.blomp.com
-tenant = ${blomp_user}
-auth_version = 1
-EOF
+    echo -e "${YELLOW}Blomp se Connect kiya ja raha hai...${NC}"
 
-    echo -e "${YELLOW}Connecting...${NC}"
-    if rclone lsd blomp: >/dev/null 2>&1; then
-        echo -e "${GREEN}✓ Blomp Storage Successfully Connect Ho Gaya!${NC}"
+    # Native Rclone Config (Handles special characters in password safely)
+    rclone config create blomp swift \
+        user "$blomp_user" \
+        key "$blomp_pass" \
+        auth "https://authenticate.blomp.com" \
+        tenant "$blomp_user" \
+        auth_version 1 >/dev/null 2>&1
+
+    # Test & Create Remote Folder
+    if rclone mkdir blomp:MinecraftBackup 2>/dev/null; then
+        echo -e "${GREEN}✓ SUCCESS: Blomp Cloud Connect ho gaya!${NC}"
     else
-        echo -e "${RED}✗ Login Failed! Email/Password check karein.${NC}"
+        echo -e "${RED}✗ Login Failed! Email ya Password galat hai.${NC}"
+        echo -e "${RED}  Check karein ke aap Blomp ki website par login ho pa rahe hain ya nahi.${NC}"
+        rclone config delete blomp >/dev/null 2>&1
     fi
-    sleep 2
+    sleep 3
 }
 
-# Check Blomp Login
+# Check Blomp Login Status
 check_blomp_login() {
     if ! rclone listremotes 2>/dev/null | grep -q "blomp:"; then
-        echo -e "${RED}Pehle Blomp Login karna zaroori hai!${NC}"
+        echo -e "${YELLOW}Pehle Blomp Login karna zaroori hai!${NC}"
         setup_blomp
     fi
 }
@@ -68,6 +68,12 @@ check_blomp_login() {
 # 2. Auto Backup (Every 15 mins)
 start_auto_backup() {
     check_blomp_login
+    
+    # Double check if login succeeded
+    if ! rclone listremotes 2>/dev/null | grep -q "blomp:"; then
+        return
+    fi
+
     echo -e "${CYAN}======================================${NC}"
     echo -e "${CYAN}   AUTO BACKUP SETUP (Har 15 Min)     ${NC}"
     echo -e "${CYAN}======================================${NC}"
@@ -97,13 +103,18 @@ EOF
     echo -e "${GREEN}✓ Auto Backup Scheduler ON ho gaya hai (Har 15 min).${NC}"
     echo -e "${YELLOW}Abhi Pehla Backup lia ja raha hai (Wait karein)...${NC}"
     /root/do_backup.sh
-    echo -e "${GREEN}✓ Pehla backup Blomp par save ho gaya!${NC}"
-    sleep 2
+    echo -e "${GREEN}✓ Pehla backup Blomp Cloud par successfully save ho gaya!${NC}"
+    sleep 3
 }
 
 # 3. Restore Backup from List
 restore_backup() {
     check_blomp_login
+
+    if ! rclone listremotes 2>/dev/null | grep -q "blomp:"; then
+        return
+    fi
+
     echo -e "${CYAN}======================================${NC}"
     echo -e "${CYAN}   BLOMP SE BACKUP RESTORE KAREIN     ${NC}"
     echo -e "${CYAN}======================================${NC}"
@@ -113,7 +124,8 @@ restore_backup() {
 
     if [ ${#files[@]} -eq 0 ]; then
         echo -e "${RED}✗ Blomp Cloud par koi backup nahi mila!${NC}"
-        sleep 2
+        echo -e "${YELLOW}Pehle Option 1 se Auto-Backup ON karein.${NC}"
+        sleep 3
         return
     fi
 
