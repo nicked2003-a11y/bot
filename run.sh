@@ -10,7 +10,7 @@ REMOTE_NAME="blomp_cloud"
 CONFIG_FILE="/root/.fakecloud_blomp"
 NAME_FILE="/root/.fakecloud_backup_name"
 BACKUP_FOLDER="Backup vps"
-KEEP_COUNT=1  # Kitne latest backups rakhne hain (1 = sirf naya)
+KEEP_COUNT=1  # Sirf 1 latest backup rahega
 
 if [ "$EUID" -ne 0 ]; then
     echo -e "${RED}Ye script ROOT user se run karein.${NC}"
@@ -166,7 +166,7 @@ show_important_data() {
     echo ""
 }
 
-# ==================== CLEANUP OLD BACKUPS (SMART) ====================
+# ==================== CLEANUP OLD BACKUPS ====================
 cleanup_old_backups() {
     local REMOTE_DIR="$1"
     local KEEP_FILE="$2"
@@ -179,24 +179,19 @@ cleanup_old_backups() {
     )
 
     local count=${#all_files[@]}
-    echo "Total backups in folder: $count" >> "$LOG"
 
     if [ "$count" -le "$KEEP_COUNT" ]; then
-        echo -e "${GREEN}Sirf $count backup(s) hain — delete zaroorat nahi.${NC}"
+        echo -e "${GREEN}Sirf $count backup hain — delete zaroorat nahi.${NC}"
         return 0
     fi
 
     local deleted=0
     for i in "${!all_files[@]}"; do
         f="${all_files[$i]}"
-        # KEEP_COUNT tak latest rakho
         if [ "$i" -lt "$KEEP_COUNT" ]; then
-            echo "KEEP: $f" >> "$LOG"
             continue
         fi
-        # Just uploaded file bhi accidently delete na ho
         if [ "$f" = "$KEEP_FILE" ]; then
-            echo "KEEP (new): $f" >> "$LOG"
             continue
         fi
         echo -e "${RED}DELETE OLD:${NC} $f"
@@ -206,10 +201,10 @@ cleanup_old_backups() {
         deleted=$((deleted+1))
     done
 
-    echo -e "${GREEN}✓ Cleanup done — deleted: $deleted, kept: $KEEP_COUNT${NC}"
+    echo -e "${GREEN}✓ Cleanup done — deleted old backups, kept latest!${NC}"
 }
 
-# ==================== FAST SMART STREAM BACKUP ====================
+# ==================== FAST SMART BACKUP (FIXED FOR BLOMP) ====================
 do_smart_vps_backup() {
     load_blomp_config
     load_backup_name
@@ -219,12 +214,12 @@ do_smart_vps_backup() {
         return 1
     fi
 
-    local TIME FILE LOG DEST_DIR DEST_FILE SUBFOLDER
+    local TIME FILE LOG DEST_DIR TEMP_FILE SUBFOLDER
     TIME=$(date +%Y-%m-%d_%H-%M-%S)
     FILE="${BACKUP_NAME}_${TIME}.tar.gz"
+    TEMP_FILE="/tmp/${FILE}"
     SUBFOLDER="${BACKUP_NAME}"
     DEST_DIR="${REMOTE_NAME}:${BLOMP_USER}/${BACKUP_FOLDER}/${SUBFOLDER}"
-    DEST_FILE="${DEST_DIR}/${FILE}"
     LOG="/var/log/fakecloud-backup.log"
 
     echo "======================================" >> "$LOG"
@@ -272,48 +267,68 @@ do_smart_vps_backup() {
     # Create Cloud Folder
     rclone mkdir "$DEST_DIR" >/dev/null 2>&1
 
-    echo -e "${CYAN}⚡ SUPER FAST SMART STREAMING SHURU...${NC}"
-    echo -e "Disk Space Used:  ${GREEN}0 MB (No Local Zip)${NC}"
+    echo -e "${CYAN}⚡ SUPER FAST SMART BACKUP & UPLOAD SHURU...${NC}"
     echo -e "Cloud Path:       ${GREEN}${BACKUP_FOLDER}/${SUBFOLDER}/${NC}"
     echo -e "Backup File:      ${GREEN}${FILE}${NC}"
     echo "--------------------------------------------------------"
 
-    COMPRESS_CMD="gzip -1 -c"
-    command -v pigz >/dev/null 2>&1 && COMPRESS_CMD="pigz -1 -c"
-
     systemctl stop wings >/dev/null 2>&1 || true
 
-    tar -cf - \
-        --absolute-names \
-        --ignore-failed-read \
-        --warning=no-file-changed \
-        --exclude="/root/*.tar.gz" \
-        --exclude="/root/.cache" \
-        --exclude="/var/lib/pterodactyl/volumes/*/.git" \
-        "${TARGET_PATHS[@]}" 2>>"$LOG" \
-    | $COMPRESS_CMD 2>>"$LOG" \
-    | rclone rcat "$DEST_FILE" \
-        --progress \
-        --stats 1s \
-        --buffer-size 64M \
-        --timeout 60m \
-        2>>"$LOG"
-
-    local STREAM_RC=$?
+    # Fast Multi-Core Compression
+    if command -v pigz >/dev/null 2>&1; then
+        tar -cf - \
+            --absolute-names \
+            --ignore-failed-read \
+            --warning=no-file-changed \
+            --exclude="/root/*.tar.gz" \
+            --exclude="/root/.cache" \
+            --exclude="/var/lib/pterodactyl/volumes/*/.git" \
+            "${TARGET_PATHS[@]}" 2>>"$LOG" \
+        | pigz -1 -c > "$TEMP_FILE" 2>>"$LOG"
+    else
+        tar -czf "$TEMP_FILE" \
+            --absolute-names \
+            --ignore-failed-read \
+            --warning=no-file-changed \
+            --exclude="/root/*.tar.gz" \
+            --exclude="/root/.cache" \
+            --exclude="/var/lib/pterodactyl/volumes/*/.git" \
+            "${TARGET_PATHS[@]}" 2>>"$LOG"
+    fi
 
     rm -f "$DB_DUMP_FILE" 2>/dev/null
     systemctl start wings >/dev/null 2>&1 || true
 
+    # Check Temp Archive Size
+    local BYTES HUMAN
+    BYTES=$(stat -c%s "$TEMP_FILE" 2>/dev/null || echo 0)
+    HUMAN=$(du -h "$TEMP_FILE" | awk '{print $1}')
+    echo -e "${CYAN}Smart Backup Size: ${HUMAN}${NC}"
+
+    echo -e "${YELLOW}Blomp Cloud par Upload Ho Raha Hai...${NC}"
+
+    # Blomp Compatible Copy
+    rclone copy "$TEMP_FILE" "$DEST_DIR/" \
+        --progress \
+        --stats 1s \
+        --timeout 60m \
+        2>>"$LOG"
+
+    local UPLOAD_RC=$?
+
+    # Immediately delete local temp file
+    rm -f "$TEMP_FILE"
+
     echo "--------------------------------------------------------"
-    if [ $STREAM_RC -eq 0 ]; then
+    if [ $UPLOAD_RC -eq 0 ]; then
         echo -e "${GREEN}✓ SMART BACKUP UPLOADED: ${SUBFOLDER}/${FILE}${NC}"
         echo "SUCCESS $FILE" >> "$LOG"
-        # Purane backups delete karo (sirf latest rakho)
+        # Purane backups cleanup
         cleanup_old_backups "$DEST_DIR" "$FILE" "$LOG"
         return 0
     else
-        echo -e "${RED}✗ Streaming Upload Failed. Check Log: $LOG${NC}"
-        echo "FAIL STREAM $FILE" >> "$LOG"
+        echo -e "${RED}✗ Upload Failed. Check Log: $LOG${NC}"
+        echo "FAIL UPLOAD $FILE" >> "$LOG"
         return 1
     fi
 }
@@ -335,11 +350,11 @@ LOG="/var/log/fakecloud-backup.log"
 
 TIME=\$(date +%Y-%m-%d_%H-%M-%S)
 FILE="\${BACKUP_NAME}_\${TIME}.tar.gz"
+TEMP_FILE="/tmp/\${FILE}"
 SUBFOLDER="\${BACKUP_NAME}"
 DEST_DIR="\${REMOTE_NAME}:\${BLOMP_USER}/\${BACKUP_FOLDER}/\${SUBFOLDER}"
-DEST_FILE="\${DEST_DIR}/\${FILE}"
 
-echo "==== \$(date) AUTO STREAM \$FILE ====" >> "\$LOG"
+echo "==== \$(date) AUTO BACKUP \$FILE ====" >> "\$LOG"
 
 DB_DUMP=""
 if command -v mysqldump >/dev/null 2>&1 && (systemctl is-active --quiet mariadb || systemctl is-active --quiet mysql); then
@@ -361,42 +376,41 @@ for p in "\${POSSIBLES[@]}"; do
     [ -e "\$p" ] && TARGETS+=("\$p")
 done
 
-COMPRESS="gzip -1 -c"
-command -v pigz >/dev/null 2>&1 && COMPRESS="pigz -1 -c"
-
 rclone mkdir "\$DEST_DIR" >/dev/null 2>&1
 
 systemctl stop wings >/dev/null 2>&1 || true
 
-tar -cf - --absolute-names --ignore-failed-read --warning=no-file-changed \\
-    --exclude="/root/*.tar.gz" --exclude="/root/.cache" \\
-    "\${TARGETS[@]}" 2>>"\$LOG" \\
-| \$COMPRESS 2>>"\$LOG" \\
-| rclone rcat "\$DEST_FILE" --buffer-size 64M --timeout 60m >>"\$LOG" 2>&1
+if command -v pigz >/dev/null 2>&1; then
+    tar -cf - --absolute-names --ignore-failed-read --warning=no-file-changed \\
+        --exclude="/root/*.tar.gz" --exclude="/root/.cache" \\
+        "\${TARGETS[@]}" 2>>"\$LOG" | pigz -1 -c > "\$TEMP_FILE" 2>>"\$LOG"
+else
+    tar -czf "\$TEMP_FILE" --absolute-names --ignore-failed-read --warning=no-file-changed \\
+        --exclude="/root/*.tar.gz" --exclude="/root/.cache" \\
+        "\${TARGETS[@]}" 2>>"\$LOG"
+fi
 
-RC=\$?
 rm -f "\$DB_DUMP" 2>/dev/null
 systemctl start wings >/dev/null 2>&1 || true
 
+rclone copy "\$TEMP_FILE" "\$DEST_DIR/" --timeout 60m >>"\$LOG" 2>&1
+RC=\$?
+
+rm -f "\$TEMP_FILE"
+
 if [ \$RC -eq 0 ]; then
     echo "SUCCESS \$FILE" >> "\$LOG"
-    # Cleanup old backups
     mapfile -t all_files < <(rclone lsf "\$DEST_DIR" --files-only --include "*.tar.gz" 2>/dev/null | sort -r)
     for i in "\${!all_files[@]}"; do
         f="\${all_files[\$i]}"
-        if [ "\$i" -lt "\$KEEP_COUNT" ]; then
-            echo "KEEP: \$f" >> "\$LOG"
-            continue
-        fi
-        if [ "\$f" = "\$FILE" ]; then
-            continue
-        fi
+        if [ "\$i" -lt "\$KEEP_COUNT" ]; then continue; fi
+        if [ "\$f" = "\$FILE" ]; then continue; fi
         rclone deletefile "\${DEST_DIR}/\${f}" 2>>"\$LOG" || true
         echo "DELETED OLD: \$f" >> "\$LOG"
     done
 fi
 
-echo "Stream end rc=\$RC" >> "\$LOG"
+echo "Backup end rc=\$RC" >> "\$LOG"
 exit \$RC
 EOF
     chmod 700 /root/do_full_backup.sh
@@ -446,14 +460,14 @@ start_auto_backup() {
     rm -f /tmp/fcron
 
     echo -e "${GREEN}✓ Auto-Backup Scheduler Active (Har 15 Min) — Name: ${BACKUP_NAME}${NC}"
-    echo -e "${YELLOW}Pehla Smart Stream Backup abhi shuru ho raha hai...${NC}"
+    echo -e "${YELLOW}Pehla Smart Backup abhi shuru ho raha hai...${NC}"
     echo ""
 
     do_smart_vps_backup
     read -p "Enter dabayein..." t
 }
 
-# ==================== 2) SMART RESTORE (2-STEP: Node → File) ====================
+# ==================== 2) SMART RESTORE ====================
 restore_backup() {
     clear
     if ! check_blomp_login; then sleep 2; return; fi
@@ -462,12 +476,10 @@ restore_backup() {
     echo -e "${YELLOW}Step 1: Node folder choose karein${NC}"
     echo ""
 
-    # Step 1: Get folders (node1, node2, panel, etc.)
     mapfile -t folders < <(
         rclone lsf "${REMOTE_NAME}:${BLOMP_USER}/${BACKUP_FOLDER}/" --dirs-only 2>/dev/null
     )
 
-    # Fallback: agar folder nahi hain, purane flat files bhi check karo
     mapfile -t flat_files < <(
         rclone lsf "${REMOTE_NAME}:${BLOMP_USER}/${BACKUP_FOLDER}/" --files-only --include "*.tar.gz" 2>/dev/null | sort -r
     )
@@ -478,9 +490,8 @@ restore_backup() {
         return
     fi
 
-    # Combined list dikhao
     OPTIONS=()
-    OPTION_TYPES=()  # "folder" or "file"
+    OPTION_TYPES=()
 
     if [ ${#folders[@]} -gt 0 ]; then
         echo -e "${GREEN}Available Nodes / Folders:${NC}"
@@ -512,9 +523,9 @@ restore_backup() {
     seltype="${OPTION_TYPES[$((choice-1))]}"
 
     local SRC=""
+    local TEMP_RESTORE="/tmp/restore_temp.tar.gz"
 
     if [ "$seltype" = "folder" ]; then
-        # Step 2: Us folder ke andar files
         echo ""
         echo -e "${YELLOW}Step 2: ${selected}/ ke andar backup choose karein${NC}"
         mapfile -t inner_files < <(
@@ -542,17 +553,28 @@ restore_backup() {
         SRC="${REMOTE_NAME}:${BLOMP_USER}/${BACKUP_FOLDER}/${selected}/${selected_file}"
         echo -e "${GREEN}Selected: ${selected}/${selected_file}${NC}"
     else
-        # Flat file (legacy)
         SRC="${REMOTE_NAME}:${BLOMP_USER}/${BACKUP_FOLDER}/${selected}"
         echo -e "${GREEN}Selected (legacy): ${selected}${NC}"
     fi
 
     echo ""
-    echo -e "${YELLOW}⚡ Direct Cloud Stream Restore Shuru...${NC}"
+    echo -e "${YELLOW}Blomp Cloud se Download aur Restore Ho Raha Hai...${NC}"
 
     systemctl stop wings >/dev/null 2>&1 || true
 
-    rclone cat "$SRC" --progress | tar -xzf - -C / --absolute-names 2>/dev/null || rclone cat "$SRC" | tar -xzf - -C /
+    rclone copy "$SRC" /tmp/ --progress
+
+    # Find the downloaded file in /tmp
+    DOWNLOADED_FILE="/tmp/$(basename "$SRC")"
+
+    if [ -f "$DOWNLOADED_FILE" ]; then
+        tar -xzf "$DOWNLOADED_FILE" -C / --absolute-names 2>/dev/null || tar -xzf "$DOWNLOADED_FILE" -C /
+        rm -f "$DOWNLOADED_FILE"
+    else
+        echo -e "${RED}✗ Download Fail Ho Gaya!${NC}"
+        read -p "Enter dabayein..." t
+        return
+    fi
 
     # Auto Import DB
     if [ -f /root/pterodactyl_database_dump.sql ]; then
@@ -598,7 +620,7 @@ EOF
     read -p "Enter dabayein..." t
 }
 
-# ==================== 4) BACKUP LIST (TREE VIEW) ====================
+# ==================== 4) BACKUP LIST ====================
 show_backups() {
     clear
     if ! check_blomp_login; then sleep 2; return; fi
@@ -613,8 +635,6 @@ show_backups() {
 
     if [ ${#folders[@]} -eq 0 ]; then
         echo -e "${YELLOW}Koi node folder nahi mila.${NC}"
-        # Legacy flat files check
-        echo -e "${CYAN}Legacy Backups:${NC}"
         rclone lsl "${REMOTE_NAME}:${BLOMP_USER}/${BACKUP_FOLDER}/" --include "*.tar.gz" 2>/dev/null
     else
         for f in "${folders[@]}"; do
@@ -646,7 +666,7 @@ while true; do
     clear
     load_backup_name
     echo -e "${GREEN}╔════════════════════════════════════════════════╗${NC}"
-    echo -e "${GREEN}║   SMART BACKUP MANAGER v6 (Auto-Cleanup)       ║${NC}"
+    echo -e "${GREEN}║   SMART BACKUP MANAGER v7 (Blomp Fixed)        ║${NC}"
     echo -e "${GREEN}╠════════════════════════════════════════════════╣${NC}"
     if [ -n "$BACKUP_NAME" ]; then
     echo -e "${GREEN}║  Name: ${YELLOW}${BACKUP_NAME}${NC}   Folder: ${YELLOW}Backup vps/${BACKUP_NAME}/${NC}"
