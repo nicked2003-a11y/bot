@@ -23,27 +23,22 @@ install_all_dependencies() {
     echo -e "${GREEN}✓ Tools ready${NC}\n"
 }
 
-# ========== BLOMP LOGIN (SSL BYPASS FIXED) ==========
+# ========== BLOMP LOGIN (SSL BYPASS ZABARDASTI) ==========
 setup_blomp() {
     echo -e "${CYAN}======================================${NC}"
-    echo -e "${CYAN}   BLOMP CLOUD LOGIN SETUP            ${NC}"
+    echo -e "${CYAN}   BLOMP CLOUD LOGIN SETUP (FIXED)    ${NC}"
     echo -e "${CYAN}======================================${NC}"
 
     read -p "Blomp Email: " blomp_user
     read -p "Blomp Password: " blomp_pass
     echo ""
 
-    echo -e "${YELLOW}Rclone + Blomp configure ho raha hai...${NC}"
+    echo -e "${YELLOW}Configuring Blomp for Rclone...${NC}"
     mkdir -p ~/.config/rclone
 
     OBS_PASS=$(rclone obscure "$blomp_pass" 2>/dev/null)
-    if [ -z "$OBS_PASS" ]; then
-        echo -e "${RED}Error: Password process nahi ho paya.${NC}"
-        read -p "Enter dabayein..." t
-        return
-    fi
-
-    # WebDAV Config with SSL Bypass (no_check_certificate)
+    
+    # WebDAV Config
     cat > ~/.config/rclone/rclone.conf <<EOF
 [blomp]
 type = webdav
@@ -51,37 +46,29 @@ url = https://dav.blomp.com
 vendor = other
 user = ${blomp_user}
 pass = ${OBS_PASS}
-no_check_certificate = true
 EOF
 
-    echo -e "${YELLOW}Connection test kiya ja raha hai...${NC}"
+    echo -e "${YELLOW}Connection test (Bypassing SSL Certificate)...${NC}"
 
-    if rclone mkdir blomp:FullServerBackup 2>/tmp/blomp_err.log && rclone lsf blomp: >/dev/null 2>>/tmp/blomp_err.log; then
+    # Adding --no-check-certificate to the command directly
+    if rclone mkdir blomp:FullServerBackup --no-check-certificate 2>/tmp/blomp_err.log; then
         echo -e "${GREEN}======================================${NC}"
         echo -e "${GREEN}✓ SUCCESS: Blomp Cloud Connect Ho Gaya!${NC}"
         echo -e "${GREEN}======================================${NC}"
     else
-        # Try alternate URL if dav.blomp.com fails
-        cat > ~/.config/rclone/rclone.conf <<EOF
-[blomp]
-type = webdav
-url = https://webdav.blomp.com
-vendor = other
-user = ${blomp_user}
-pass = ${OBS_PASS}
-no_check_certificate = true
-EOF
-
-        if rclone mkdir blomp:FullServerBackup 2>/tmp/blomp_err.log && rclone lsf blomp: >/dev/null 2>>/tmp/blomp_err.log; then
-            echo -e "${GREEN}======================================${NC}"
-            echo -e "${GREEN}✓ SUCCESS: Blomp Cloud Connect Ho Gaya!${NC}"
-            echo -e "${GREEN}======================================${NC}"
+        echo -e "${RED}======================================${NC}"
+        echo -e "${RED}✗ LOGIN FAIL — Error Detail:${NC}"
+        echo -e "${RED}======================================${NC}"
+        cat /tmp/blomp_err.log
+        echo -e "${YELLOW}Trying alternate URL...${NC}"
+        
+        # Alternate URL check
+        sed -i 's/dav.blomp.com/webdav.blomp.com/' ~/.config/rclone/rclone.conf
+        if rclone lsf blomp: --no-check-certificate >/dev/null 2>&1; then
+             echo -e "${GREEN}✓ SUCCESS (with alternate URL)!${NC}"
         else
-            echo -e "${RED}======================================${NC}"
-            echo -e "${RED}✗ LOGIN FAIL — Error detail:${NC}"
-            echo -e "${RED}======================================${NC}"
-            cat /tmp/blomp_err.log 2>/dev/null
-            rm -f ~/.config/rclone/rclone.conf
+             echo -e "${RED}Abhi bhi connect nahi ho raha. Check Email/Password.${NC}"
+             rm -f ~/.config/rclone/rclone.conf
         fi
     fi
 
@@ -110,7 +97,8 @@ start_auto_backup() {
 TIME=$(date +%Y-%m-%d_%H-%M)
 FILE="FULL_BACKUP_${TIME}.tar.gz"
 tar -czf "/root/${FILE}" /var/lib/pterodactyl /etc/pterodactyl /etc/letsencrypt 2>/dev/null
-rclone copy "/root/${FILE}" blomp:FullServerBackup/ --retries 5
+# Force SSL bypass during upload
+rclone copy "/root/${FILE}" blomp:FullServerBackup/ --no-check-certificate --retries 5
 rm -f "/root/${FILE}"
 EOF
     chmod +x /root/do_full_backup.sh
@@ -118,10 +106,10 @@ EOF
     crontab -l 2>/dev/null | grep -v "do_full_backup" | crontab -
     (crontab -l 2>/dev/null; echo "*/15 * * * * /root/do_full_backup.sh >/dev/null 2>&1") | crontab -
 
-    echo -e "${GREEN}✓ Scheduler ON (Har 15 min baad auto backup hoga)${NC}"
-    echo -e "${YELLOW}Pehla FULL backup abhi lia ja raha hai (Heavy Data, Wait Karein)...${NC}"
+    echo -e "${GREEN}✓ Scheduler ON (15 min)${NC}"
+    echo -e "${YELLOW}Pehla FULL backup shuru...${NC}"
     /root/do_full_backup.sh
-    echo -e "${GREEN}✓ Pehla backup Blomp Cloud par upload ho gaya!${NC}"
+    echo -e "${GREEN}✓ Process complete.${NC}"
     sleep 2
 }
 
@@ -133,12 +121,13 @@ restore_backup() {
     fi
 
     echo -e "${CYAN}=== FULL SYSTEM RESTORE FROM BLOMP ===${NC}"
-    echo -e "${YELLOW}Backups list load ho rahi hai...${NC}"
+    echo -e "${YELLOW}Loading backups list...${NC}"
 
-    mapfile -t files < <(rclone lsf blomp:FullServerBackup/ --include "*.tar.gz" 2>/dev/null)
+    # Force SSL bypass during list
+    mapfile -t files < <(rclone lsf blomp:FullServerBackup/ --include "*.tar.gz" --no-check-certificate 2>/dev/null)
 
     if [ ${#files[@]} -eq 0 ]; then
-        echo -e "${RED}✗ Blomp Cloud par koi backup nahi mila! Pehle Option 1 se Backup lein.${NC}"
+        echo -e "${RED}✗ Koi backup nahi mila!${NC}"
         sleep 2
         return
     fi
@@ -150,23 +139,21 @@ restore_backup() {
     done
     echo "--------------------------------------------------------"
 
-    read -p "Konsa backup restore karna hai? [1-${#files[@]}]: " choice
+    read -p "Backup number chunein: " choice
 
     if [[ "$choice" -ge 1 && "$choice" -le "${#files[@]}" ]] 2>/dev/null; then
         selected="${files[$((choice-1))]}"
-        echo -e "${YELLOW}Downloading: ${selected} ...${NC}"
-        rclone copy "blomp:FullServerBackup/${selected}" /root/ --retries 5
+        echo -e "${YELLOW}Downloading (SSL Bypass): ${selected}${NC}"
+        rclone copy "blomp:FullServerBackup/${selected}" /root/ --no-check-certificate --retries 5
 
-        echo -e "${YELLOW}Extracting & Restoring...${NC}"
+        echo -e "${YELLOW}Restoring data...${NC}"
         tar -xzf "/root/${selected}" -C / 2>/dev/null
         rm -f "/root/${selected}"
 
         systemctl restart docker >/dev/null 2>&1
         systemctl restart wings >/dev/null 2>&1
 
-        echo -e "${GREEN}====================================================${NC}"
-        echo -e "${GREEN}  ✓ FULL RESTORE SUCCESSFUL!                       ${NC}"
-        echo -e "${GREEN}====================================================${NC}"
+        echo -e "${GREEN}✓ FULL RESTORE SUCCESSFUL!${NC}"
     else
         echo -e "${RED}Galat option!${NC}"
     fi
@@ -179,7 +166,7 @@ install_all_dependencies
 while true; do
     clear
     echo -e "${GREEN}╔═════════════════════════════════════════════════╗${NC}"
-    echo -e "${GREEN}║  PTERODACTYL FULL CLOUD MANAGER (Blomp Fixed)   ║${NC}"
+    echo -e "${GREEN}║   PTERODACTYL FULL CLOUD MANAGER (SSL FIXED)    ║${NC}"
     echo -e "${GREEN}╠═════════════════════════════════════════════════╣${NC}"
     echo -e "${GREEN}║  ${YELLOW}1)${NC} FULL Auto-Backup ON (Har 15 Min)           ${GREEN}║${NC}"
     echo -e "${GREEN}║  ${YELLOW}2)${NC} FULL Restore (1, 2, 3 List Se Choose)     ${GREEN}║${NC}"
@@ -193,6 +180,6 @@ while true; do
         2) restore_backup ;;
         3) setup_blomp ;;
         4) exit 0 ;;
-        *) echo -e "${RED}Sahi option select karein!${NC}"; sleep 1 ;;
+        *) echo -e "${RED}Sahi number daalein!${NC}"; sleep 1 ;;
     esac
 done
