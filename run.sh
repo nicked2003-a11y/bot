@@ -139,8 +139,9 @@ check_blomp_login() {
 
 # ==================== CHECK IMPORTANT DATA ====================
 show_important_data() {
-    echo -e "${CYAN}--- System / Blueprint Addons / Wings Paths ---${NC}"
+    echo -e "${CYAN}--- System / App / Database / Wings / Cloudflare Paths ---${NC}"
     PATHS=(
+        "/var/lib/mysql"
         "/var/lib/pterodactyl"
         "/etc/pterodactyl"
         "/var/www/pterodactyl"
@@ -150,6 +151,8 @@ show_important_data() {
         "/root/.cloudflared"
         "/etc/letsencrypt"
         "/etc/nginx"
+        "/etc/php"
+        "/etc/supervisor"
         "/root"
         "/home"
         "/etc/systemd/system"
@@ -192,7 +195,7 @@ cleanup_old_backups() {
     echo -e "${GREEN}✓ Cleanup done — Sirf LATEST rahega!${NC}"
 }
 
-# ==================== GUARANTEED ZERO-FAIL DB ENGINE ====================
+# ==================== DOUBLE-LAYER DATABASE DUMP ENGINE ====================
 create_database_dump() {
     local OUT="/tmp/pterodactyl_database_dump.sql"
     local LOG="${1:-/var/log/fakecloud-backup.log}"
@@ -232,19 +235,6 @@ create_database_dump() {
         return 0
     fi
 
-    # 4. Fallback: Raw /var/lib/mysql Tar
-    local RAW_OUT="/tmp/mysql_raw_datadir.tar.gz"
-    rm -f "$RAW_OUT"
-    if [ -d /var/lib/mysql ]; then
-        systemctl stop mysql mariadb >/dev/null 2>&1 || true
-        tar -czf "$RAW_OUT" --absolute-names --ignore-failed-read /var/lib/mysql 2>>"$LOG" || true
-        systemctl start mysql mariadb >/dev/null 2>&1 || true
-        if [ -s "$RAW_OUT" ]; then
-            echo "$RAW_OUT"
-            return 0
-        fi
-    fi
-
     return 1
 }
 
@@ -270,15 +260,15 @@ do_smart_vps_backup() {
     echo "======================================" >> "$LOG"
     echo "SMART BACKUP START $(date) file=$FILE" >> "$LOG"
 
-    # 1. GUARANTEED DB BACKUP
-    echo -e "${YELLOW}[1/4] Database Backup (Zero-Fail Engine)...${NC}"
-    DB_BACKUP_PATH=$(create_database_dump "$LOG")
+    # 1. LAYER 1: SQL DUMP
+    echo -e "${YELLOW}[1/4] Layer 1: Database SQL Dump Banaya Ja Raha Hai...${NC}"
+    DB_DUMP_PATH=$(create_database_dump "$LOG")
 
-    if [ -n "$DB_BACKUP_PATH" ] && [ -f "$DB_BACKUP_PATH" ]; then
-        DUMP_SZ=$(du -h "$DB_BACKUP_PATH" | awk '{print $1}')
-        echo -e "${GREEN}   ✓ Database Backup Secured: ${DUMP_SZ}${NC}"
+    if [ -n "$DB_DUMP_PATH" ] && [ -f "$DB_BACKUP_PATH" ]; then
+        DUMP_SZ=$(du -h "$DB_DUMP_PATH" | awk '{print $1}')
+        echo -e "${GREEN}   ✓ SQL Dump Created: ${DUMP_SZ}${NC}"
     else
-        echo -e "${RED}   ⚠ Database Not Found / Skipped${NC}"
+        echo -e "${YELLOW}   ! SQL Dump fail ho gaya — Layer 2 Raw /var/lib/mysql direct backup hoga.${NC}"
     fi
 
     # 2. Cloudflared token backup
@@ -286,33 +276,34 @@ do_smart_vps_backup() {
         cp /etc/cloudflared/token /tmp/cloudflared_token_backup 2>/dev/null || true
     fi
 
-    # 3. Target Paths (BLUEPRINT, ADDONS, THEMES, WINGS FULLY INCLUDED)
+    # 3. LAYER 2 + FULL APP DATA TARGET PATHS
     TARGET_PATHS=()
     POSSIBLE_PATHS=(
-        "/var/lib/pterodactyl"
-        "/etc/pterodactyl"
-        "/var/www/pterodactyl"
-        "/var/lib/tailscale"
+        "/var/lib/mysql"           # LAYER 2: RAW MYSQL DATABASE FILES ON DISK
+        "/var/lib/pterodactyl"     # Game Volumes
+        "/etc/pterodactyl"         # Wings Configs
+        "/var/www/pterodactyl"     # Panel, Blueprint, Themes, Extensions, .env, Vendor, Composer
+        "/var/lib/tailscale"       # Tailscale Data
         "/etc/tailscale"
         "/etc/default/tailscaled"
-        "/etc/cloudflared"
+        "/etc/cloudflared"         # Cloudflare Tunnels & Tokens
         "/root/.cloudflared"
-        "/etc/letsencrypt"
-        "/etc/nginx"
+        "/etc/letsencrypt"        # SSL Certs
+        "/etc/nginx"               # Webserver Configs
         "/etc/apache2"
-        "/etc/php"
-        "/etc/mysql"
-        "/etc/redis"
-        "/etc/supervisor"
-        "/root"
+        "/etc/php"                 # PHP Configs
+        "/etc/mysql"               # MySQL Configs
+        "/etc/redis"               # Redis Configs
+        "/etc/supervisor"          # Queue Worker Configs
+        "/root"                    # Root Scripts & Settings
         "/home"
-        "/etc/systemd/system"
-        "/usr/local/bin"
-        "/var/spool/cron"
+        "/etc/systemd/system"      # Custom Services
+        "/usr/local/bin"           # Binaries (Wings, Composer, etc.)
+        "/var/spool/cron"          # Cronjobs
         "/etc/crontab"
     )
 
-    [ -n "$DB_BACKUP_PATH" ] && [ -f "$DB_BACKUP_PATH" ] && TARGET_PATHS+=("$DB_BACKUP_PATH")
+    [ -n "$DB_DUMP_PATH" ] && [ -s "$DB_DUMP_PATH" ] && TARGET_PATHS+=("$DB_DUMP_PATH")
     [ -f /tmp/cloudflared_token_backup ] && TARGET_PATHS+=("/tmp/cloudflared_token_backup")
 
     for p in "${POSSIBLE_PATHS[@]}"; do
@@ -321,11 +312,11 @@ do_smart_vps_backup() {
 
     if [ ${#TARGET_PATHS[@]} -eq 0 ]; then
         echo -e "${RED}✗ Backup karne ke liye koi data nahi mila!${NC}"
-        rm -f "$DB_BACKUP_PATH" /tmp/cloudflared_token_backup 2>/dev/null
+        rm -f "$DB_DUMP_PATH" /tmp/cloudflared_token_backup 2>/dev/null
         return 1
     fi
 
-    echo -e "${CYAN}[2/4] COMPRESSING ALL FILES (BLUEPRINT + ADDONS + DB)...${NC}"
+    echo -e "${CYAN}[2/4] COMPRESSING ALL DATA (DATABASE + BLUEPRINT + ADDONS + WINGS)...${NC}"
     echo -e "  Cloud Folder: ${GREEN}${BACKUP_FOLDER}/${SUBFOLDER}/${NC}"
     echo -e "  Backup File:  ${GREEN}${FILE}${NC}"
     echo "--------------------------------------------------------"
@@ -333,6 +324,7 @@ do_smart_vps_backup() {
     systemctl stop wings >/dev/null 2>&1 || true
     rm -f "$TEMP_FILE"
 
+    # Tar Compression (Excluding OS Bloat)
     if command -v pigz >/dev/null 2>&1; then
         tar -cf - \
             --absolute-names \
@@ -342,6 +334,18 @@ do_smart_vps_backup() {
             --exclude="/root/.cache" \
             --exclude="/tmp/*.tar.gz" \
             --exclude="/var/www/pterodactyl/node_modules" \
+            --exclude="/proc" \
+            --exclude="/sys" \
+            --exclude="/dev" \
+            --exclude="/run" \
+            --exclude="/tmp" \
+            --exclude="/mnt" \
+            --exclude="/media" \
+            --exclude="/lost+found" \
+            --exclude="/var/tmp" \
+            --exclude="/var/cache" \
+            --exclude="/var/lib/docker/overlay2" \
+            --exclude="/var/lib/docker/tmp" \
             "${TARGET_PATHS[@]}" 2>>"$LOG" \
         | pigz -1 -c > "$TEMP_FILE" 2>>"$LOG"
     else
@@ -353,10 +357,22 @@ do_smart_vps_backup() {
             --exclude="/root/.cache" \
             --exclude="/tmp/*.tar.gz" \
             --exclude="/var/www/pterodactyl/node_modules" \
+            --exclude="/proc" \
+            --exclude="/sys" \
+            --exclude="/dev" \
+            --exclude="/run" \
+            --exclude="/tmp" \
+            --exclude="/mnt" \
+            --exclude="/media" \
+            --exclude="/lost+found" \
+            --exclude="/var/tmp" \
+            --exclude="/var/cache" \
+            --exclude="/var/lib/docker/overlay2" \
+            --exclude="/var/lib/docker/tmp" \
             "${TARGET_PATHS[@]}" 2>>"$LOG"
     fi
 
-    rm -f "$DB_BACKUP_PATH" /tmp/cloudflared_token_backup 2>/dev/null
+    rm -f "$DB_DUMP_PATH" /tmp/cloudflared_token_backup 2>/dev/null
     systemctl start wings >/dev/null 2>&1 || true
 
     if [ ! -f "$TEMP_FILE" ]; then
@@ -445,6 +461,7 @@ TARGETS=()
 [ -f /tmp/cloudflared_token_backup ] && TARGETS+=("/tmp/cloudflared_token_backup")
 
 POSSIBLES=(
+    "/var/lib/mysql"
     "/var/lib/pterodactyl" "/etc/pterodactyl" "/var/www/pterodactyl"
     "/var/lib/tailscale" "/etc/tailscale" "/etc/default/tailscaled"
     "/etc/cloudflared" "/root/.cloudflared"
@@ -464,11 +481,13 @@ if command -v pigz >/dev/null 2>&1; then
     tar -cf - --absolute-names --ignore-failed-read --warning=no-file-changed \
         --exclude="/root/*.tar.gz" --exclude="/root/.cache" --exclude="/tmp/*.tar.gz" \
         --exclude="/var/www/pterodactyl/node_modules" \
+        --exclude="/proc" --exclude="/sys" --exclude="/dev" --exclude="/run" --exclude="/tmp" \
         "${TARGETS[@]}" 2>>"$LOG" | pigz -1 -c > "$TEMP_FILE" 2>>"$LOG"
 else
     tar -czf "$TEMP_FILE" --absolute-names --ignore-failed-read --warning=no-file-changed \
         --exclude="/root/*.tar.gz" --exclude="/root/.cache" --exclude="/tmp/*.tar.gz" \
         --exclude="/var/www/pterodactyl/node_modules" \
+        --exclude="/proc" --exclude="/sys" --exclude="/dev" --exclude="/run" --exclude="/tmp" \
         "${TARGETS[@]}" 2>>"$LOG"
 fi
 
@@ -510,7 +529,7 @@ start_auto_backup() {
     echo -e "${CYAN}╚════════════════════════════════════════════╝${NC}"
     echo ""
     echo -e "Cloud: ${YELLOW}BackupVps/[NAME]/${NC}"
-    echo -e "Includes: ${GREEN}Panel + Database + Blueprint Addons + Themes + Wings + Cloudflare${NC}"
+    echo -e "Includes: ${GREEN}Panel + Double-Layer DB + Blueprint + Addons + Themes + Wings + Cloudflare${NC}"
     echo ""
 
     load_backup_name
@@ -570,7 +589,7 @@ auto_setup_panel() {
         return 1
     fi
 
-    # 2. Extract Credentials & Always Create User & Database for BOTH 127.0.0.1 & localhost
+    # 2. Extract Credentials & Always Create Users for BOTH 127.0.0.1 & localhost
     DB_USER="pterodactyl"
     DB_PASS=""
     DB_NAME="panel"
@@ -603,17 +622,13 @@ auto_setup_panel() {
         mysql -e "FLUSH PRIVILEGES;" 2>/dev/null || true
     fi
 
-    # 3. Database Auto-Restore
+    # 3. Database Auto-Restore (Layer 1 SQL Dump or Layer 2 Raw /var/lib/mysql)
     DUMP_FOUND=""
     [ -f /tmp/pterodactyl_database_dump.sql ] && DUMP_FOUND="/tmp/pterodactyl_database_dump.sql"
     [ -f /root/pterodactyl_database_dump.sql ] && DUMP_FOUND="/root/pterodactyl_database_dump.sql"
 
-    RAW_DATADIR=""
-    [ -f /tmp/mysql_raw_datadir.tar.gz ] && RAW_DATADIR="/tmp/mysql_raw_datadir.tar.gz"
-    [ -f /root/mysql_raw_datadir.tar.gz ] && RAW_DATADIR="/root/mysql_raw_datadir.tar.gz"
-
     if [ -n "$DUMP_FOUND" ]; then
-        echo -e "${YELLOW}Database Dump Auto-Import... (${DUMP_FOUND})${NC}"
+        echo -e "${YELLOW}Layer 1: Database SQL Dump Auto-Import... (${DUMP_FOUND})${NC}"
         if [ -n "$DB_PASS" ]; then
             MYSQL_PWD="$DB_PASS" mysql -h"$DB_HOST" -u"$DB_USER" "${DB_NAME}" < "$DUMP_FOUND" 2>/dev/null || \
             mysql "${DB_NAME}" < "$DUMP_FOUND" 2>/dev/null
@@ -621,23 +636,25 @@ auto_setup_panel() {
             mysql "${DB_NAME}" < "$DUMP_FOUND" 2>/dev/null
         fi
 
-        if [ $req -eq 0 2>/dev/null ] || [ -s "$DUMP_FOUND" ]; then
-            echo -e "${GREEN}   ✓ Database Restored Successfully!${NC}"
-        fi
+        echo -e "${GREEN}   ✓ SQL Database Restored!${NC}"
         rm -f "$DUMP_FOUND"
-    elif [ -n "$RAW_DATADIR" ]; then
-        echo -e "${YELLOW}Raw MySQL DataDir Restore...${NC}"
-        systemctl stop mysql mariadb >/dev/null 2>&1 || true
-        tar -xzf "$RAW_DATADIR" -C / --absolute-names 2>/dev/null
+    elif [ -d /var/lib/mysql ]; then
+        echo -e "${GREEN}   ✓ Layer 2: Raw /var/lib/mysql Already Restored On Disk!${NC}"
         chown -R mysql:mysql /var/lib/mysql 2>/dev/null
-        systemctl start mysql mariadb >/dev/null 2>&1 || true
-        rm -f "$RAW_DATADIR"
-        echo -e "${GREEN}   ✓ Raw MySQL DataDir Restored!${NC}"
-    else
-        echo -e "${YELLOW}   ! DB Dump Nahi Mila — fresh migrate chalaya ja raha hai...${NC}"
-        cd /var/www/pterodactyl
-        php artisan migrate --force 2>/dev/null || true
-        php artisan db:seed --force 2>/dev/null || true
+        systemctl restart mysql mariadb 2>/dev/null || true
+    fi
+
+    # Fix MySQL User Permissions Again After DB Import
+    if [ -n "$DB_PASS" ]; then
+        mysql -e "CREATE USER IF NOT EXISTS '${DB_USER}'@'127.0.0.1' IDENTIFIED BY '${DB_PASS}';" 2>/dev/null || true
+        mysql -e "ALTER USER '${DB_USER}'@'127.0.0.1' IDENTIFIED BY '${DB_PASS}';" 2>/dev/null || true
+        mysql -e "GRANT ALL PRIVILEGES ON \`${DB_NAME}\`.* TO '${DB_USER}'@'127.0.0.1';" 2>/dev/null || true
+
+        mysql -e "CREATE USER IF NOT EXISTS '${DB_USER}'@'localhost' IDENTIFIED BY '${DB_PASS}';" 2>/dev/null || true
+        mysql -e "ALTER USER '${DB_USER}'@'localhost' IDENTIFIED BY '${DB_PASS}';" 2>/dev/null || true
+        mysql -e "GRANT ALL PRIVILEGES ON \`${DB_NAME}\`.* TO '${DB_USER}'@'localhost';" 2>/dev/null || true
+
+        mysql -e "FLUSH PRIVILEGES;" 2>/dev/null || true
     fi
 
     # 4. Blueprint & Pterodactyl Permissions + Cache Repair
@@ -1031,7 +1048,7 @@ while true; do
     clear
     load_backup_name
     echo -e "${GREEN}╔════════════════════════════════════════════════╗${NC}"
-    echo -e "${GREEN}║   SMART BACKUP MANAGER v13 (Perfect Master)    ║${NC}"
+    echo -e "${GREEN}║   SMART BACKUP MANAGER v14 (Double-DB Master)  ║${NC}"
     echo -e "${GREEN}╠════════════════════════════════════════════════╣${NC}"
     if [ -n "$BACKUP_NAME" ]; then
     echo -e "${GREEN}║  Name: ${YELLOW}${BACKUP_NAME}${NC}   Folder: ${YELLOW}BackupVps/${BACKUP_NAME}/${NC}"
