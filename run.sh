@@ -192,7 +192,63 @@ cleanup_old_backups() {
     echo -e "${GREEN}✓ Cleanup done — Sirf LATEST rahega!${NC}"
 }
 
-# ==================== GUARANTEED DB & BLUEPRINT BACKUP ====================
+# ==================== GUARANTEED ZERO-FAIL DB ENGINE ====================
+create_database_dump() {
+    local OUT="/tmp/pterodactyl_database_dump.sql"
+    local LOG="${1:-/var/log/fakecloud-backup.log}"
+    rm -f "$OUT"
+
+    systemctl start mysql mariadb >/dev/null 2>&1 || true
+    sleep 1
+
+    # 1. Try with .env credentials
+    if [ -f /var/www/pterodactyl/.env ]; then
+        local DB_USER DB_PASS DB_NAME DB_HOST
+        DB_USER=$(grep -E '^DB_USERNAME=' /var/www/pterodactyl/.env | head -1 | cut -d'=' -f2- | tr -d '"' | tr -d "'" | tr -d '\r')
+        DB_PASS=$(grep -E '^DB_PASSWORD=' /var/www/pterodactyl/.env | head -1 | cut -d'=' -f2- | tr -d '"' | tr -d "'" | tr -d '\r')
+        DB_NAME=$(grep -E '^DB_DATABASE=' /var/www/pterodactyl/.env | head -1 | cut -d'=' -f2- | tr -d '"' | tr -d "'" | tr -d '\r')
+        DB_HOST=$(grep -E '^DB_HOST=' /var/www/pterodactyl/.env | head -1 | cut -d'=' -f2- | tr -d '"' | tr -d "'" | tr -d '\r')
+        [ -z "$DB_HOST" ] && DB_HOST="127.0.0.1"
+
+        if [ -n "$DB_USER" ] && [ -n "$DB_NAME" ]; then
+            MYSQL_PWD="$DB_PASS" mysqldump -h"$DB_HOST" -u"$DB_USER" \
+                --single-transaction --quick --routines --triggers --events \
+                "$DB_NAME" > "$OUT" 2>>"$LOG" || true
+        fi
+    fi
+
+    # 2. Try root socket dump
+    if [ ! -s "$OUT" ] && command -v mysqldump >/dev/null 2>&1; then
+        mysqldump --all-databases --single-transaction --quick --routines --triggers --events > "$OUT" 2>>"$LOG" || true
+    fi
+
+    # 3. Try debian.cnf (Ubuntu Default)
+    if [ ! -s "$OUT" ] && [ -f /etc/mysql/debian.cnf ]; then
+        mysqldump --defaults-file=/etc/mysql/debian.cnf --all-databases --single-transaction --quick --routines --triggers --events > "$OUT" 2>>"$LOG" || true
+    fi
+
+    if [ -s "$OUT" ]; then
+        echo "$OUT"
+        return 0
+    fi
+
+    # 4. Fallback: Raw /var/lib/mysql Tar
+    local RAW_OUT="/tmp/mysql_raw_datadir.tar.gz"
+    rm -f "$RAW_OUT"
+    if [ -d /var/lib/mysql ]; then
+        systemctl stop mysql mariadb >/dev/null 2>&1 || true
+        tar -czf "$RAW_OUT" --absolute-names --ignore-failed-read /var/lib/mysql 2>>"$LOG" || true
+        systemctl start mysql mariadb >/dev/null 2>&1 || true
+        if [ -s "$RAW_OUT" ]; then
+            echo "$RAW_OUT"
+            return 0
+        fi
+    fi
+
+    return 1
+}
+
+# ==================== SUPER SMART BACKUP ENGINE ====================
 do_smart_vps_backup() {
     load_blomp_config
     load_backup_name
@@ -214,31 +270,15 @@ do_smart_vps_backup() {
     echo "======================================" >> "$LOG"
     echo "SMART BACKUP START $(date) file=$FILE" >> "$LOG"
 
-    # 1. HARDENED DATABASE DUMP (MUST NOT FAIL)
-    DB_DUMP_FILE="/tmp/pterodactyl_database_dump.sql"
-    rm -f "$DB_DUMP_FILE"
+    # 1. GUARANTEED DB BACKUP
+    echo -e "${YELLOW}[1/4] Database Backup (Zero-Fail Engine)...${NC}"
+    DB_BACKUP_PATH=$(create_database_dump "$LOG")
 
-    echo -e "${YELLOW}[1/4] Database Dump Banaya Ja Raha Hai...${NC}"
-
-    if [ -f /var/www/pterodactyl/.env ]; then
-        DB_USER=$(grep -E '^DB_USERNAME=' /var/www/pterodactyl/.env | head -1 | cut -d'=' -f2 | tr -d '"' | tr -d "'")
-        DB_PASS=$(grep -E '^DB_PASSWORD=' /var/www/pterodactyl/.env | head -1 | cut -d'=' -f2 | tr -d '"' | tr -d "'")
-        DB_NAME=$(grep -E '^DB_DATABASE=' /var/www/pterodactyl/.env | head -1 | cut -d'=' -f2 | tr -d '"' | tr -d "'")
-        DB_HOST=$(grep -E '^DB_HOST=' /var/www/pterodactyl/.env | head -1 | cut -d'=' -f2 | tr -d '"' | tr -d "'")
-        [ -z "$DB_HOST" ] && DB_HOST="127.0.0.1"
-
-        mysqldump -h"$DB_HOST" -u"$DB_USER" -p"$DB_PASS" --single-transaction --quick --routines --triggers "$DB_NAME" > "$DB_DUMP_FILE" 2>>"$LOG"
-    fi
-
-    if [ ! -s "$DB_DUMP_FILE" ] && command -v mysqldump >/dev/null 2>&1; then
-        mysqldump --all-databases --single-transaction --quick --routines --triggers > "$DB_DUMP_FILE" 2>>"$LOG" || true
-    fi
-
-    if [ -s "$DB_DUMP_FILE" ]; then
-        DUMP_SIZE=$(du -h "$DB_DUMP_FILE" | awk '{print $1}')
-        echo -e "${GREEN}   ✓ MySQL Database Dump OK (${DUMP_SIZE})${NC}"
+    if [ -n "$DB_BACKUP_PATH" ] && [ -f "$DB_BACKUP_PATH" ]; then
+        DUMP_SZ=$(du -h "$DB_BACKUP_PATH" | awk '{print $1}')
+        echo -e "${GREEN}   ✓ Database Backup Secured: ${DUMP_SZ}${NC}"
     else
-        echo -e "${RED}   ⚠ WARNING: Database Dump nahi ban paya! Check MySQL status.${NC}"
+        echo -e "${RED}   ⚠ Database Not Found / Skipped${NC}"
     fi
 
     # 2. Cloudflared token backup
@@ -246,7 +286,7 @@ do_smart_vps_backup() {
         cp /etc/cloudflared/token /tmp/cloudflared_token_backup 2>/dev/null || true
     fi
 
-    # 3. Target Paths (BLUEPRINT & ADDONS FULLY INCLUDED)
+    # 3. Target Paths (BLUEPRINT, ADDONS, THEMES, WINGS FULLY INCLUDED)
     TARGET_PATHS=()
     POSSIBLE_PATHS=(
         "/var/lib/pterodactyl"
@@ -272,7 +312,7 @@ do_smart_vps_backup() {
         "/etc/crontab"
     )
 
-    [ -s "$DB_DUMP_FILE" ] && TARGET_PATHS+=("$DB_DUMP_FILE")
+    [ -n "$DB_BACKUP_PATH" ] && [ -f "$DB_BACKUP_PATH" ] && TARGET_PATHS+=("$DB_BACKUP_PATH")
     [ -f /tmp/cloudflared_token_backup ] && TARGET_PATHS+=("/tmp/cloudflared_token_backup")
 
     for p in "${POSSIBLE_PATHS[@]}"; do
@@ -281,11 +321,11 @@ do_smart_vps_backup() {
 
     if [ ${#TARGET_PATHS[@]} -eq 0 ]; then
         echo -e "${RED}✗ Backup karne ke liye koi data nahi mila!${NC}"
-        rm -f "$DB_DUMP_FILE" /tmp/cloudflared_token_backup 2>/dev/null
+        rm -f "$DB_BACKUP_PATH" /tmp/cloudflared_token_backup 2>/dev/null
         return 1
     fi
 
-    echo -e "${CYAN}[2/4] COMPRESSING ALL FILES (WITH BLUEPRINT & ADDONS)...${NC}"
+    echo -e "${CYAN}[2/4] COMPRESSING ALL FILES (BLUEPRINT + ADDONS + DB)...${NC}"
     echo -e "  Cloud Folder: ${GREEN}${BACKUP_FOLDER}/${SUBFOLDER}/${NC}"
     echo -e "  Backup File:  ${GREEN}${FILE}${NC}"
     echo "--------------------------------------------------------"
@@ -293,7 +333,6 @@ do_smart_vps_backup() {
     systemctl stop wings >/dev/null 2>&1 || true
     rm -f "$TEMP_FILE"
 
-    # Blueprint & Pterodactyl Complete Archive
     if command -v pigz >/dev/null 2>&1; then
         tar -cf - \
             --absolute-names \
@@ -302,6 +341,7 @@ do_smart_vps_backup() {
             --exclude="/root/*.tar.gz" \
             --exclude="/root/.cache" \
             --exclude="/tmp/*.tar.gz" \
+            --exclude="/var/www/pterodactyl/node_modules" \
             "${TARGET_PATHS[@]}" 2>>"$LOG" \
         | pigz -1 -c > "$TEMP_FILE" 2>>"$LOG"
     else
@@ -312,10 +352,11 @@ do_smart_vps_backup() {
             --exclude="/root/*.tar.gz" \
             --exclude="/root/.cache" \
             --exclude="/tmp/*.tar.gz" \
+            --exclude="/var/www/pterodactyl/node_modules" \
             "${TARGET_PATHS[@]}" 2>>"$LOG"
     fi
 
-    rm -f "$DB_DUMP_FILE" /tmp/cloudflared_token_backup 2>/dev/null
+    rm -f "$DB_BACKUP_PATH" /tmp/cloudflared_token_backup 2>/dev/null
     systemctl start wings >/dev/null 2>&1 || true
 
     if [ ! -f "$TEMP_FILE" ]; then
@@ -349,48 +390,59 @@ create_auto_worker() {
     load_blomp_config
     load_backup_name
 
-    cat > /root/do_full_backup.sh <<EOF
+    cat > /root/do_full_backup.sh <<'EOF'
 #!/bin/bash
 export PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin
 
-REMOTE_NAME="${REMOTE_NAME}"
-BLOMP_USER="${BLOMP_USER}"
-BACKUP_FOLDER="${BACKUP_FOLDER}"
-BACKUP_NAME="${BACKUP_NAME}"
-KEEP_COUNT=${KEEP_COUNT}
-RCLONE_FLAGS="${RCLONE_FLAGS}"
+REMOTE_NAME="blomp_cloud"
+CONFIG_FILE="/root/.fakecloud_blomp"
+NAME_FILE="/root/.fakecloud_backup_name"
+BACKUP_FOLDER="BackupVps"
+KEEP_COUNT=1
+RCLONE_FLAGS="--no-check-certificate --retries 5 --timeout 60m --contimeout 60s"
 LOG="/var/log/fakecloud-backup.log"
 
-TIME=\$(date +%Y-%m-%d_%H-%M-%S)
-FILE="\${BACKUP_NAME}_\${TIME}.tar.gz"
-TEMP_FILE="/tmp/\${FILE}"
-SUBFOLDER="\${BACKUP_NAME}"
-DEST_DIR="\${REMOTE_NAME}:\${BLOMP_USER}/\${BACKUP_FOLDER}/\${SUBFOLDER}"
-DEST_OBJECT="\${DEST_DIR}/\${FILE}"
+[ -f "$CONFIG_FILE" ] && source "$CONFIG_FILE"
+[ -f "$NAME_FILE" ] && BACKUP_NAME=$(cat "$NAME_FILE" | tr -cd 'A-Za-z0-9._-')
+[ -z "$BACKUP_NAME" ] && BACKUP_NAME="panel"
 
-echo "==== \$(date) AUTO BACKUP \$FILE ====" >> "\$LOG"
+TIME=$(date +%Y-%m-%d_%H-%M-%S)
+FILE="${BACKUP_NAME}_${TIME}.tar.gz"
+TEMP_FILE="/tmp/${FILE}"
+SUBFOLDER="${BACKUP_NAME}"
+DEST_DIR="${REMOTE_NAME}:${BLOMP_USER}/${BACKUP_FOLDER}/${SUBFOLDER}"
+DEST_OBJECT="${DEST_DIR}/${FILE}"
 
-DB_DUMP_FILE="/tmp/pterodactyl_database_dump.sql"
-rm -f "\$DB_DUMP_FILE"
+echo "==== $(date) AUTO BACKUP $FILE ====" >> "$LOG"
+
+# Database Dump Function
+DB_BACKUP_PATH="/tmp/pterodactyl_database_dump.sql"
+rm -f "$DB_BACKUP_PATH"
+
+systemctl start mysql mariadb >/dev/null 2>&1 || true
 
 if [ -f /var/www/pterodactyl/.env ]; then
-    DB_USER=\$(grep -E '^DB_USERNAME=' /var/www/pterodactyl/.env | head -1 | cut -d'=' -f2 | tr -d '"' | tr -d "'")
-    DB_PASS=\$(grep -E '^DB_PASSWORD=' /var/www/pterodactyl/.env | head -1 | cut -d'=' -f2 | tr -d '"' | tr -d "'")
-    DB_NAME=\$(grep -E '^DB_DATABASE=' /var/www/pterodactyl/.env | head -1 | cut -d'=' -f2 | tr -d '"' | tr -d "'")
-    DB_HOST=\$(grep -E '^DB_HOST=' /var/www/pterodactyl/.env | head -1 | cut -d'=' -f2 | tr -d '"' | tr -d "'")
-    [ -z "\$DB_HOST" ] && DB_HOST="127.0.0.1"
+    DB_USER=$(grep -E '^DB_USERNAME=' /var/www/pterodactyl/.env | head -1 | cut -d'=' -f2- | tr -d '"' | tr -d "'" | tr -d '\r')
+    DB_PASS=$(grep -E '^DB_PASSWORD=' /var/www/pterodactyl/.env | head -1 | cut -d'=' -f2- | tr -d '"' | tr -d "'" | tr -d '\r')
+    DB_NAME=$(grep -E '^DB_DATABASE=' /var/www/pterodactyl/.env | head -1 | cut -d'=' -f2- | tr -d '"' | tr -d "'" | tr -d '\r')
+    DB_HOST=$(grep -E '^DB_HOST=' /var/www/pterodactyl/.env | head -1 | cut -d'=' -f2- | tr -d '"' | tr -d "'" | tr -d '\r')
+    [ -z "$DB_HOST" ] && DB_HOST="127.0.0.1"
 
-    mysqldump -h"\$DB_HOST" -u"\$DB_USER" -p"\$DB_PASS" --single-transaction --quick --routines --triggers "\$DB_NAME" > "\$DB_DUMP_FILE" 2>>"\$LOG"
+    if [ -n "$DB_USER" ] && [ -n "$DB_NAME" ]; then
+        MYSQL_PWD="$DB_PASS" mysqldump -h"$DB_HOST" -u"$DB_USER" \
+            --single-transaction --quick --routines --triggers --events \
+            "$DB_NAME" > "$DB_BACKUP_PATH" 2>>"$LOG" || true
+    fi
 fi
 
-if [ ! -s "\$DB_DUMP_FILE" ] && command -v mysqldump >/dev/null 2>&1; then
-    mysqldump --all-databases --single-transaction --quick --routines --triggers > "\$DB_DUMP_FILE" 2>>"\$LOG" || true
+if [ ! -s "$DB_BACKUP_PATH" ] && command -v mysqldump >/dev/null 2>&1; then
+    mysqldump --all-databases --single-transaction --quick --routines --triggers --events > "$DB_BACKUP_PATH" 2>>"$LOG" || true
 fi
 
 [ -f /etc/cloudflared/token ] && cp /etc/cloudflared/token /tmp/cloudflared_token_backup 2>/dev/null || true
 
 TARGETS=()
-[ -s "\$DB_DUMP_FILE" ] && TARGETS+=("\$DB_DUMP_FILE")
+[ -s "$DB_BACKUP_PATH" ] && TARGETS+=("$DB_BACKUP_PATH")
 [ -f /tmp/cloudflared_token_backup ] && TARGETS+=("/tmp/cloudflared_token_backup")
 
 POSSIBLES=(
@@ -403,44 +455,46 @@ POSSIBLES=(
     "/var/spool/cron" "/etc/crontab"
 )
 
-for p in "\${POSSIBLES[@]}"; do
-    [ -e "\$p" ] && TARGETS+=("\$p")
+for p in "${POSSIBLES[@]}"; do
+    [ -e "$p" ] && TARGETS+=("$p")
 done
 
 systemctl stop wings >/dev/null 2>&1 || true
 
 if command -v pigz >/dev/null 2>&1; then
-    tar -cf - --absolute-names --ignore-failed-read --warning=no-file-changed \\
-        --exclude="/root/*.tar.gz" --exclude="/root/.cache" --exclude="/tmp/*.tar.gz" \\
-        "\${TARGETS[@]}" 2>>"\$LOG" | pigz -1 -c > "\$TEMP_FILE" 2>>"\$LOG"
+    tar -cf - --absolute-names --ignore-failed-read --warning=no-file-changed \
+        --exclude="/root/*.tar.gz" --exclude="/root/.cache" --exclude="/tmp/*.tar.gz" \
+        --exclude="/var/www/pterodactyl/node_modules" \
+        "${TARGETS[@]}" 2>>"$LOG" | pigz -1 -c > "$TEMP_FILE" 2>>"$LOG"
 else
-    tar -czf "\$TEMP_FILE" --absolute-names --ignore-failed-read --warning=no-file-changed \\
-        --exclude="/root/*.tar.gz" --exclude="/root/.cache" --exclude="/tmp/*.tar.gz" \\
-        "\${TARGETS[@]}" 2>>"\$LOG"
+    tar -czf "$TEMP_FILE" --absolute-names --ignore-failed-read --warning=no-file-changed \
+        --exclude="/root/*.tar.gz" --exclude="/root/.cache" --exclude="/tmp/*.tar.gz" \
+        --exclude="/var/www/pterodactyl/node_modules" \
+        "${TARGETS[@]}" 2>>"$LOG"
 fi
 
-rm -f "\$DB_DUMP_FILE" /tmp/cloudflared_token_backup 2>/dev/null
+rm -f "$DB_BACKUP_PATH" /tmp/cloudflared_token_backup 2>/dev/null
 systemctl start wings >/dev/null 2>&1 || true
 
-rclone copyto "\$TEMP_FILE" "\$DEST_OBJECT" \$RCLONE_FLAGS >>"\$LOG" 2>&1
-RC=\$?
+rclone copyto "$TEMP_FILE" "$DEST_OBJECT" $RCLONE_FLAGS >>"$LOG" 2>&1
+RC=$?
 
-rm -f "\$TEMP_FILE"
+rm -f "$TEMP_FILE"
 
-if [ \$RC -eq 0 ]; then
-    echo "SUCCESS \$FILE" >> "\$LOG"
-    mapfile -t all_files < <(rclone lsf "\$DEST_DIR" --files-only --include "*.tar.gz" \$RCLONE_FLAGS 2>/dev/null | sort -r)
-    for i in "\${!all_files[@]}"; do
-        f="\${all_files[\$i]}"
-        [ "\$i" -lt "\$KEEP_COUNT" ] && continue
-        [ "\$f" = "\$FILE" ] && continue
-        rclone deletefile "\${DEST_DIR}/\${f}" \$RCLONE_FLAGS 2>>"\$LOG" || true
-        echo "DELETED OLD: \$f" >> "\$LOG"
+if [ $RC -eq 0 ]; then
+    echo "SUCCESS $FILE" >> "$LOG"
+    mapfile -t all_files < <(rclone lsf "$DEST_DIR" --files-only --include "*.tar.gz" $RCLONE_FLAGS 2>/dev/null | sort -r)
+    for i in "${!all_files[@]}"; do
+        f="${all_files[$i]}"
+        [ "$i" -lt "$KEEP_COUNT" ] && continue
+        [ "$f" = "$FILE" ] && continue
+        rclone deletefile "${DEST_DIR}/${f}" $RCLONE_FLAGS 2>>"$LOG" || true
+        echo "DELETED OLD: $f" >> "$LOG"
     done
 fi
 
-echo "Backup end rc=\$RC" >> "\$LOG"
-exit \$RC
+echo "Backup end rc=$RC" >> "$LOG"
+exit $RC
 EOF
     chmod 700 /root/do_full_backup.sh
 }
@@ -519,20 +573,22 @@ auto_setup_panel() {
         return 1
     fi
 
-    # Database Auto-Restore
+    # 1. AUTO DATABASE RESTORE
+    systemctl start mariadb mysql >/dev/null 2>&1 || true
+    sleep 2
+
+    # Option A: SQL Dump
     if [ -f /tmp/pterodactyl_database_dump.sql ] || [ -f /root/pterodactyl_database_dump.sql ]; then
         DF=/root/pterodactyl_database_dump.sql
         [ -f /tmp/pterodactyl_database_dump.sql ] && DF=/tmp/pterodactyl_database_dump.sql
 
         echo -e "${YELLOW}Database Dump Auto-Import...${NC}"
-        systemctl start mariadb mysql >/dev/null 2>&1 || true
-        sleep 2
 
         if [ -f /var/www/pterodactyl/.env ]; then
-            DB_USER=$(grep -E '^DB_USERNAME=' /var/www/pterodactyl/.env | head -1 | cut -d'=' -f2 | tr -d '"' | tr -d "'")
-            DB_PASS=$(grep -E '^DB_PASSWORD=' /var/www/pterodactyl/.env | head -1 | cut -d'=' -f2 | tr -d '"' | tr -d "'")
-            DB_NAME=$(grep -E '^DB_DATABASE=' /var/www/pterodactyl/.env | head -1 | cut -d'=' -f2 | tr -d '"' | tr -d "'")
-            DB_HOST=$(grep -E '^DB_HOST=' /var/www/pterodactyl/.env | head -1 | cut -d'=' -f2 | tr -d '"' | tr -d "'")
+            DB_USER=$(grep -E '^DB_USERNAME=' /var/www/pterodactyl/.env | head -1 | cut -d'=' -f2- | tr -d '"' | tr -d "'" | tr -d '\r')
+            DB_PASS=$(grep -E '^DB_PASSWORD=' /var/www/pterodactyl/.env | head -1 | cut -d'=' -f2- | tr -d '"' | tr -d "'" | tr -d '\r')
+            DB_NAME=$(grep -E '^DB_DATABASE=' /var/www/pterodactyl/.env | head -1 | cut -d'=' -f2- | tr -d '"' | tr -d "'" | tr -d '\r')
+            DB_HOST=$(grep -E '^DB_HOST=' /var/www/pterodactyl/.env | head -1 | cut -d'=' -f2- | tr -d '"' | tr -d "'" | tr -d '\r')
             [ -z "$DB_HOST" ] && DB_HOST="127.0.0.1"
 
             mysql -h"$DB_HOST" -e "CREATE DATABASE IF NOT EXISTS \`${DB_NAME}\`;" 2>/dev/null
@@ -540,17 +596,28 @@ auto_setup_panel() {
             mysql -h"$DB_HOST" -e "GRANT ALL PRIVILEGES ON \`${DB_NAME}\`.* TO '${DB_USER}'@'127.0.0.1';" 2>/dev/null
             mysql -h"$DB_HOST" -e "FLUSH PRIVILEGES;" 2>/dev/null
 
-            mysql -h"$DB_HOST" -u"$DB_USER" -p"$DB_PASS" "${DB_NAME}" < "$DF" 2>/dev/null || mysql "${DB_NAME}" < "$DF" 2>/dev/null
+            MYSQL_PWD="$DB_PASS" mysql -h"$DB_HOST" -u"$DB_USER" "${DB_NAME}" < "$DF" 2>/dev/null || mysql "${DB_NAME}" < "$DF" 2>/dev/null
 
             if [ $? -eq 0 ]; then
                 echo -e "${GREEN}   ✓ Database Restored Successfully!${NC}"
             else
-                echo -e "${RED}   ✗ DB Import Fail Ho Gaya!${NC}"
+                echo -e "${RED}   ✗ DB Import Fail!${NC}"
             fi
         else
             mysql < "$DF" 2>/dev/null && echo -e "${GREEN}   ✓ DB Restored${NC}"
         fi
         rm -f "$DF"
+    # Option B: Raw MySQL DataDir Restore
+    elif [ -f /tmp/mysql_raw_datadir.tar.gz ] || [ -f /root/mysql_raw_datadir.tar.gz ]; -o [ -f /tmp/mysql_raw_datadir.tar.gz ]; then
+        RAW_DF=/root/mysql_raw_datadir.tar.gz
+        [ -f /tmp/mysql_raw_datadir.tar.gz ] && RAW_DF=/tmp/mysql_raw_datadir.tar.gz
+        echo -e "${YELLOW}Raw MySQL DataDir Restore...${NC}"
+        systemctl stop mysql mariadb >/dev/null 2>&1 || true
+        tar -xzf "$RAW_DF" -C / --absolute-names 2>/dev/null
+        chown -R mysql:mysql /var/lib/mysql 2>/dev/null
+        systemctl start mysql mariadb >/dev/null 2>&1 || true
+        rm -f "$RAW_DF"
+        echo -e "${GREEN}   ✓ Raw MySQL Datadir Restored!${NC}"
     else
         echo -e "${YELLOW}   ! DB Dump Nahi Mila — fresh migrate chalaya ja raha hai...${NC}"
         cd /var/www/pterodactyl
@@ -563,7 +630,6 @@ auto_setup_panel() {
     chown -R www-data:www-data /var/www/pterodactyl 2>/dev/null
     chmod -R 755 storage bootstrap/cache 2>/dev/null
 
-    # Run Migrations to bind Blueprint Addon Tables
     echo -e "${YELLOW}Blueprint & Addons Cache Sync...${NC}"
     php artisan migrate --force 2>/dev/null || true
     php artisan config:clear 2>/dev/null
@@ -579,7 +645,7 @@ auto_setup_panel() {
 
     # Nginx Site (Default Server Fix)
     rm -f /etc/nginx/sites-enabled/default
-    DOMAIN=$(grep '^APP_URL=' /var/www/pterodactyl/.env | head -1 | cut -d'=' -f2 | tr -d '"' | tr -d "'" | sed 's|https\?://||' | tr -d '/')
+    DOMAIN=$(grep -E '^APP_URL=' /var/www/pterodactyl/.env | head -1 | cut -d'=' -f2- | tr -d '"' | tr -d "'" | tr -d '\r' | sed 's|https\?://||' | tr -d '/')
     [ -z "$DOMAIN" ] && DOMAIN="_"
 
     cat > /etc/nginx/sites-available/pterodactyl.conf << EOF
@@ -871,7 +937,7 @@ restore_backup() {
     done
 
     if [ -f /var/www/pterodactyl/.env ]; then
-        APP_URL=$(grep '^APP_URL=' /var/www/pterodactyl/.env | head -1 | cut -d'=' -f2 | tr -d '"' | tr -d "'")
+        APP_URL=$(grep -E '^APP_URL=' /var/www/pterodactyl/.env | head -1 | cut -d'=' -f2- | tr -d '"' | tr -d "'")
         echo ""
         echo -e "${CYAN}Panel URL: ${YELLOW}${APP_URL}${NC}"
     fi
@@ -950,7 +1016,7 @@ while true; do
     clear
     load_backup_name
     echo -e "${GREEN}╔════════════════════════════════════════════════╗${NC}"
-    echo -e "${GREEN}║   SMART BACKUP MANAGER v11 (Blueprint Master)  ║${NC}"
+    echo -e "${GREEN}║   SMART BACKUP MANAGER v12 (Guaranteed DB Fix) ║${NC}"
     echo -e "${GREEN}╠════════════════════════════════════════════════╣${NC}"
     if [ -n "$BACKUP_NAME" ]; then
     echo -e "${GREEN}║  Name: ${YELLOW}${BACKUP_NAME}${NC}   Folder: ${YELLOW}BackupVps/${BACKUP_NAME}/${NC}"
