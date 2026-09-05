@@ -415,7 +415,6 @@ DEST_OBJECT="${DEST_DIR}/${FILE}"
 
 echo "==== $(date) AUTO BACKUP $FILE ====" >> "$LOG"
 
-# Database Dump Function
 DB_BACKUP_PATH="/tmp/pterodactyl_database_dump.sql"
 rm -f "$DB_BACKUP_PATH"
 
@@ -550,8 +549,8 @@ start_auto_backup() {
 auto_setup_panel() {
     echo -e "${CYAN}--- PANEL & BLUEPRINT AUTO-SETUP SHURU ---${NC}"
 
-    # PHP + Nginx + MySQL + Redis Install
-    if ! command -v php >/dev/null 2>&1 || ! command -v nginx >/dev/null 2>&1; then
+    # 1. PHP + Nginx + MySQL + Redis Install
+    if ! command -v php >/dev/null 2>&1 || ! command -v nginx >/dev/null 2>&1 || ! command -v mysql >/dev/null 2>&1; then
         echo -e "${YELLOW}Panel Stack Install (PHP+Nginx+MySQL+Redis)...${NC}"
         apt-get install -y software-properties-common curl gnupg >/dev/null 2>&1
         add-apt-repository -y ppa:ondrej/php >/dev/null 2>&1
@@ -563,61 +562,77 @@ auto_setup_panel() {
         echo -e "${GREEN}   ✓ Stack installed${NC}"
     fi
 
-    # Composer
-    if ! command -v composer >/dev/null 2>&1; then
-        curl -sS https://getcomposer.org/installer | php -- --install-dir=/usr/local/bin --filename=composer >/dev/null 2>&1
-    fi
+    systemctl start mysql mariadb >/dev/null 2>&1 || true
+    sleep 2
 
     if [ ! -d /var/www/pterodactyl ]; then
         echo -e "${RED}   Panel directory nahi mili${NC}"
         return 1
     fi
 
-    # 1. AUTO DATABASE RESTORE
-    systemctl start mariadb mysql >/dev/null 2>&1 || true
-    sleep 2
+    # 2. Extract Credentials & Always Create User & Database for BOTH 127.0.0.1 & localhost
+    DB_USER="pterodactyl"
+    DB_PASS=""
+    DB_NAME="panel"
+    DB_HOST="127.0.0.1"
 
-    # Option A: SQL Dump
-    if [ -f /tmp/pterodactyl_database_dump.sql ] || [ -f /root/pterodactyl_database_dump.sql ]; then
-        DF=/root/pterodactyl_database_dump.sql
-        [ -f /tmp/pterodactyl_database_dump.sql ] && DF=/tmp/pterodactyl_database_dump.sql
+    if [ -f /var/www/pterodactyl/.env ]; then
+        ENV_USER=$(grep -E '^DB_USERNAME=' /var/www/pterodactyl/.env | head -1 | cut -d'=' -f2- | tr -d '"' | tr -d "'" | tr -d '\r')
+        ENV_PASS=$(grep -E '^DB_PASSWORD=' /var/www/pterodactyl/.env | head -1 | cut -d'=' -f2- | tr -d '"' | tr -d "'" | tr -d '\r')
+        ENV_NAME=$(grep -E '^DB_DATABASE=' /var/www/pterodactyl/.env | head -1 | cut -d'=' -f2- | tr -d '"' | tr -d "'" | tr -d '\r')
+        ENV_HOST=$(grep -E '^DB_HOST=' /var/www/pterodactyl/.env | head -1 | cut -d'=' -f2- | tr -d '"' | tr -d "'" | tr -d '\r')
+        
+        [ -n "$ENV_USER" ] && DB_USER="$ENV_USER"
+        [ -n "$ENV_PASS" ] && DB_PASS="$ENV_PASS"
+        [ -n "$ENV_NAME" ] && DB_NAME="$ENV_NAME"
+        [ -n "$ENV_HOST" ] && DB_HOST="$ENV_HOST"
+    fi
 
-        echo -e "${YELLOW}Database Dump Auto-Import...${NC}"
+    echo -e "${YELLOW}MySQL Database & Permissions Setup...${NC}"
+    mysql -e "CREATE DATABASE IF NOT EXISTS \`${DB_NAME}\`;" 2>/dev/null || true
 
-        if [ -f /var/www/pterodactyl/.env ]; then
-            DB_USER=$(grep -E '^DB_USERNAME=' /var/www/pterodactyl/.env | head -1 | cut -d'=' -f2- | tr -d '"' | tr -d "'" | tr -d '\r')
-            DB_PASS=$(grep -E '^DB_PASSWORD=' /var/www/pterodactyl/.env | head -1 | cut -d'=' -f2- | tr -d '"' | tr -d "'" | tr -d '\r')
-            DB_NAME=$(grep -E '^DB_DATABASE=' /var/www/pterodactyl/.env | head -1 | cut -d'=' -f2- | tr -d '"' | tr -d "'" | tr -d '\r')
-            DB_HOST=$(grep -E '^DB_HOST=' /var/www/pterodactyl/.env | head -1 | cut -d'=' -f2- | tr -d '"' | tr -d "'" | tr -d '\r')
-            [ -z "$DB_HOST" ] && DB_HOST="127.0.0.1"
+    if [ -n "$DB_PASS" ]; then
+        mysql -e "CREATE USER IF NOT EXISTS '${DB_USER}'@'127.0.0.1' IDENTIFIED BY '${DB_PASS}';" 2>/dev/null || true
+        mysql -e "ALTER USER '${DB_USER}'@'127.0.0.1' IDENTIFIED BY '${DB_PASS}';" 2>/dev/null || true
+        mysql -e "GRANT ALL PRIVILEGES ON \`${DB_NAME}\`.* TO '${DB_USER}'@'127.0.0.1';" 2>/dev/null || true
 
-            mysql -h"$DB_HOST" -e "CREATE DATABASE IF NOT EXISTS \`${DB_NAME}\`;" 2>/dev/null
-            mysql -h"$DB_HOST" -e "CREATE USER IF NOT EXISTS '${DB_USER}'@'127.0.0.1' IDENTIFIED BY '${DB_PASS}';" 2>/dev/null
-            mysql -h"$DB_HOST" -e "GRANT ALL PRIVILEGES ON \`${DB_NAME}\`.* TO '${DB_USER}'@'127.0.0.1';" 2>/dev/null
-            mysql -h"$DB_HOST" -e "FLUSH PRIVILEGES;" 2>/dev/null
+        mysql -e "CREATE USER IF NOT EXISTS '${DB_USER}'@'localhost' IDENTIFIED BY '${DB_PASS}';" 2>/dev/null || true
+        mysql -e "ALTER USER '${DB_USER}'@'localhost' IDENTIFIED BY '${DB_PASS}';" 2>/dev/null || true
+        mysql -e "GRANT ALL PRIVILEGES ON \`${DB_NAME}\`.* TO '${DB_USER}'@'localhost';" 2>/dev/null || true
 
-            MYSQL_PWD="$DB_PASS" mysql -h"$DB_HOST" -u"$DB_USER" "${DB_NAME}" < "$DF" 2>/dev/null || mysql "${DB_NAME}" < "$DF" 2>/dev/null
+        mysql -e "FLUSH PRIVILEGES;" 2>/dev/null || true
+    fi
 
-            if [ $? -eq 0 ]; then
-                echo -e "${GREEN}   ✓ Database Restored Successfully!${NC}"
-            else
-                echo -e "${RED}   ✗ DB Import Fail!${NC}"
-            fi
+    # 3. Database Auto-Restore
+    DUMP_FOUND=""
+    [ -f /tmp/pterodactyl_database_dump.sql ] && DUMP_FOUND="/tmp/pterodactyl_database_dump.sql"
+    [ -f /root/pterodactyl_database_dump.sql ] && DUMP_FOUND="/root/pterodactyl_database_dump.sql"
+
+    RAW_DATADIR=""
+    [ -f /tmp/mysql_raw_datadir.tar.gz ] && RAW_DATADIR="/tmp/mysql_raw_datadir.tar.gz"
+    [ -f /root/mysql_raw_datadir.tar.gz ] && RAW_DATADIR="/root/mysql_raw_datadir.tar.gz"
+
+    if [ -n "$DUMP_FOUND" ]; then
+        echo -e "${YELLOW}Database Dump Auto-Import... (${DUMP_FOUND})${NC}"
+        if [ -n "$DB_PASS" ]; then
+            MYSQL_PWD="$DB_PASS" mysql -h"$DB_HOST" -u"$DB_USER" "${DB_NAME}" < "$DUMP_FOUND" 2>/dev/null || \
+            mysql "${DB_NAME}" < "$DUMP_FOUND" 2>/dev/null
         else
-            mysql < "$DF" 2>/dev/null && echo -e "${GREEN}   ✓ DB Restored${NC}"
+            mysql "${DB_NAME}" < "$DUMP_FOUND" 2>/dev/null
         fi
-        rm -f "$DF"
-    # Option B: Raw MySQL DataDir Restore
-    elif [ -f /tmp/mysql_raw_datadir.tar.gz ] || [ -f /root/mysql_raw_datadir.tar.gz ]; -o [ -f /tmp/mysql_raw_datadir.tar.gz ]; then
-        RAW_DF=/root/mysql_raw_datadir.tar.gz
-        [ -f /tmp/mysql_raw_datadir.tar.gz ] && RAW_DF=/tmp/mysql_raw_datadir.tar.gz
+
+        if [ $req -eq 0 2>/dev/null ] || [ -s "$DUMP_FOUND" ]; then
+            echo -e "${GREEN}   ✓ Database Restored Successfully!${NC}"
+        fi
+        rm -f "$DUMP_FOUND"
+    elif [ -n "$RAW_DATADIR" ]; then
         echo -e "${YELLOW}Raw MySQL DataDir Restore...${NC}"
         systemctl stop mysql mariadb >/dev/null 2>&1 || true
-        tar -xzf "$RAW_DF" -C / --absolute-names 2>/dev/null
+        tar -xzf "$RAW_DATADIR" -C / --absolute-names 2>/dev/null
         chown -R mysql:mysql /var/lib/mysql 2>/dev/null
         systemctl start mysql mariadb >/dev/null 2>&1 || true
-        rm -f "$RAW_DF"
-        echo -e "${GREEN}   ✓ Raw MySQL Datadir Restored!${NC}"
+        rm -f "$RAW_DATADIR"
+        echo -e "${GREEN}   ✓ Raw MySQL DataDir Restored!${NC}"
     else
         echo -e "${YELLOW}   ! DB Dump Nahi Mila — fresh migrate chalaya ja raha hai...${NC}"
         cd /var/www/pterodactyl
@@ -625,7 +640,7 @@ auto_setup_panel() {
         php artisan db:seed --force 2>/dev/null || true
     fi
 
-    # Blueprint & Pterodactyl Permissions + Cache Repair
+    # 4. Blueprint & Pterodactyl Permissions + Cache Repair
     cd /var/www/pterodactyl
     chown -R www-data:www-data /var/www/pterodactyl 2>/dev/null
     chmod -R 755 storage bootstrap/cache 2>/dev/null
@@ -643,7 +658,7 @@ auto_setup_panel() {
         bash /var/www/pterodactyl/blueprint.sh -rerun 2>/dev/null || true
     fi
 
-    # Nginx Site (Default Server Fix)
+    # 5. Nginx Site (Default Server Fix)
     rm -f /etc/nginx/sites-enabled/default
     DOMAIN=$(grep -E '^APP_URL=' /var/www/pterodactyl/.env | head -1 | cut -d'=' -f2- | tr -d '"' | tr -d "'" | tr -d '\r' | sed 's|https\?://||' | tr -d '/')
     [ -z "$DOMAIN" ] && DOMAIN="_"
@@ -683,7 +698,7 @@ EOF
     nginx -t 2>/dev/null && systemctl restart nginx
     echo -e "${GREEN}   ✓ Nginx Configured For: ${DOMAIN}${NC}"
 
-    # Queue Worker
+    # 6. Queue Worker
     if [ ! -f /etc/supervisor/conf.d/pterodactyl-worker.conf ]; then
         cat > /etc/supervisor/conf.d/pterodactyl-worker.conf << 'EOF'
 [program:pterodactyl-worker]
@@ -1016,7 +1031,7 @@ while true; do
     clear
     load_backup_name
     echo -e "${GREEN}╔════════════════════════════════════════════════╗${NC}"
-    echo -e "${GREEN}║   SMART BACKUP MANAGER v12 (Guaranteed DB Fix) ║${NC}"
+    echo -e "${GREEN}║   SMART BACKUP MANAGER v13 (Perfect Master)    ║${NC}"
     echo -e "${GREEN}╠════════════════════════════════════════════════╣${NC}"
     if [ -n "$BACKUP_NAME" ]; then
     echo -e "${GREEN}║  Name: ${YELLOW}${BACKUP_NAME}${NC}   Folder: ${YELLOW}BackupVps/${BACKUP_NAME}/${NC}"
