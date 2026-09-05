@@ -225,14 +225,12 @@ do_smart_vps_backup() {
     echo "======================================" >> "$LOG"
     echo "SMART BACKUP START $(date) file=$FILE" >> "$LOG"
 
-    # DB Dump (MySQL / MariaDB) - Auto detect
+    # DB Dump
     DB_DUMP_FILE=""
     if command -v mysqldump >/dev/null 2>&1; then
         if systemctl is-active --quiet mariadb || systemctl is-active --quiet mysql; then
             echo -e "${YELLOW}[1/4] Database Auto-Dump...${NC}"
             DB_DUMP_FILE="/tmp/pterodactyl_database_dump.sql"
-            
-            # Try from .env file (Panel VPS)
             if [ -f /var/www/pterodactyl/.env ]; then
                 DB_USER=$(grep '^DB_USERNAME=' /var/www/pterodactyl/.env | cut -d'=' -f2)
                 DB_PASS=$(grep '^DB_PASSWORD=' /var/www/pterodactyl/.env | cut -d'=' -f2)
@@ -244,22 +242,13 @@ do_smart_vps_backup() {
             else
                 mysqldump --all-databases --single-transaction --quick --routines --triggers > "$DB_DUMP_FILE" 2>>"$LOG" || true
             fi
-            
-            if [ -s "$DB_DUMP_FILE" ]; then
-                DUMP_SIZE=$(du -h "$DB_DUMP_FILE" | awk '{print $1}')
-                echo -e "${GREEN}   ✓ DB Dump: ${DUMP_SIZE}${NC}"
-            else
-                echo -e "${RED}   ✗ DB Dump Empty (mysql running hai?)${NC}"
-            fi
         fi
     fi
 
-    # Cloudflared Token backup
     if [ -f /etc/cloudflared/token ]; then
         cp /etc/cloudflared/token /tmp/cloudflared_token_backup 2>/dev/null || true
     fi
 
-    # Target Paths
     TARGET_PATHS=()
     POSSIBLE_PATHS=(
         "/var/lib/pterodactyl"
@@ -285,7 +274,7 @@ do_smart_vps_backup() {
         "/etc/crontab"
         "/etc/hosts"
     )
-    [ -n "$DB_DUMP_FILE" ] && [ -s "$DB_DUMP_FILE" ] && TARGET_PATHS+=("$DB_DUMP_FILE")
+    [ -n "$DB_DUMP_FILE" ] && [ -f "$DB_DUMP_FILE" ] && TARGET_PATHS+=("$DB_DUMP_FILE")
     [ -f /tmp/cloudflared_token_backup ] && TARGET_PATHS+=("/tmp/cloudflared_token_backup")
 
     for p in "${POSSIBLE_PATHS[@]}"; do
@@ -427,6 +416,7 @@ systemctl start wings >/dev/null 2>&1 || true
 
 rclone copyto "\$TEMP_FILE" "\$DEST_OBJECT" \$RCLONE_FLAGS >>"\$LOG" 2>&1
 RC=\$?
+
 rm -f "\$TEMP_FILE"
 
 if [ \$RC -eq 0 ]; then
@@ -440,6 +430,7 @@ if [ \$RC -eq 0 ]; then
         echo "DELETED OLD: \$f" >> "\$LOG"
     done
 fi
+
 echo "Backup end rc=\$RC" >> "\$LOG"
 exit \$RC
 EOF
@@ -458,7 +449,7 @@ start_auto_backup() {
     echo -e "${CYAN}╚════════════════════════════════════════════╝${NC}"
     echo ""
     echo -e "Cloud: ${YELLOW}BackupVps/[NAME]/${NC}"
-    echo -e "Includes: ${GREEN}Panel + Wings + Docker + DB + Cloudflare + Tailscale + SSL + Cron${NC}"
+    echo -e "Includes: ${GREEN}Panel + Wings + Docker + DB + Cloudflare + Tailscale + SSL${NC}"
     echo ""
 
     load_backup_name
@@ -529,7 +520,6 @@ auto_setup_panel() {
         systemctl start mariadb mysql >/dev/null 2>&1 || true
         sleep 2
 
-        # Create DB from .env
         if [ -f /var/www/pterodactyl/.env ]; then
             DB_USER=$(grep '^DB_USERNAME=' /var/www/pterodactyl/.env | cut -d'=' -f2)
             DB_PASS=$(grep '^DB_PASSWORD=' /var/www/pterodactyl/.env | cut -d'=' -f2)
@@ -573,15 +563,16 @@ auto_setup_panel() {
     php artisan view:clear 2>/dev/null
     php artisan route:clear 2>/dev/null
 
-    # Nginx Site
-    if [ ! -f /etc/nginx/sites-enabled/pterodactyl.conf ]; then
-        DOMAIN=$(grep '^APP_URL=' /var/www/pterodactyl/.env | cut -d'=' -f2 | sed 's|https\?://||' | tr -d '/')
-        [ -z "$DOMAIN" ] && DOMAIN="_"
+    # Nginx Site (Default Server Fix)
+    rm -f /etc/nginx/sites-enabled/default
+    DOMAIN=$(grep '^APP_URL=' /var/www/pterodactyl/.env | cut -d'=' -f2 | sed 's|https\?://||' | tr -d '/')
+    [ -z "$DOMAIN" ] && DOMAIN="_"
 
-        cat > /etc/nginx/sites-available/pterodactyl.conf << EOF
+    cat > /etc/nginx/sites-available/pterodactyl.conf << EOF
 server {
-    listen 80;
-    server_name ${DOMAIN};
+    listen 80 default_server;
+    listen [::]:80 default_server;
+    server_name ${DOMAIN} _;
     root /var/www/pterodactyl/public;
     index index.php;
     client_max_body_size 100m;
@@ -597,14 +588,20 @@ server {
         include fastcgi_params;
         fastcgi_param PHP_VALUE "upload_max_filesize = 100M \\n post_max_size=100M";
         fastcgi_param SCRIPT_FILENAME \$document_root\$fastcgi_script_name;
+        fastcgi_param HTTP_PROXY "";
+        fastcgi_intercept_errors off;
+        fastcgi_buffer_size 16k;
+        fastcgi_buffers 4 16k;
+    }
+
+    location ~ /\.ht {
+        deny all;
     }
 }
 EOF
-        ln -sf /etc/nginx/sites-available/pterodactyl.conf /etc/nginx/sites-enabled/
-        rm -f /etc/nginx/sites-enabled/default
-        nginx -t 2>/dev/null && systemctl reload nginx
-        echo -e "${GREEN}   ✓ Nginx configured for: ${DOMAIN}${NC}"
-    fi
+    ln -sf /etc/nginx/sites-available/pterodactyl.conf /etc/nginx/sites-enabled/
+    nginx -t 2>/dev/null && systemctl restart nginx
+    echo -e "${GREEN}   ✓ Nginx configured for: ${DOMAIN}${NC}"
 
     # Queue Worker
     if [ ! -f /etc/supervisor/conf.d/pterodactyl-worker.conf ]; then
@@ -633,14 +630,12 @@ EOF
 auto_setup_wings() {
     echo -e "${CYAN}--- WINGS AUTO-SETUP SHURU ---${NC}"
 
-    # Docker Install
     if ! command -v docker >/dev/null 2>&1; then
         echo -e "${YELLOW}Docker install...${NC}"
         curl -sSL https://get.docker.com/ | CHANNEL=stable bash >/dev/null 2>&1
         systemctl enable --now docker >/dev/null 2>&1
     fi
 
-    # Wings binary
     if [ ! -f /usr/local/bin/wings ]; then
         echo -e "${YELLOW}Wings binary install...${NC}"
         mkdir -p /etc/pterodactyl /var/lib/pterodactyl
@@ -648,7 +643,6 @@ auto_setup_wings() {
         chmod u+x /usr/local/bin/wings
     fi
 
-    # Wings Service
     if [ ! -f /etc/systemd/system/wings.service ]; then
         cat > /etc/systemd/system/wings.service <<'EOF'
 [Unit]
@@ -692,7 +686,6 @@ EOF
 auto_setup_cloudflared() {
     echo -e "${CYAN}--- CLOUDFLARE TUNNEL AUTO-SETUP ---${NC}"
 
-    # Token restore
     if [ -f /tmp/cloudflared_token_backup ]; then
         mkdir -p /etc/cloudflared
         cp /tmp/cloudflared_token_backup /etc/cloudflared/token
@@ -700,7 +693,6 @@ auto_setup_cloudflared() {
         rm -f /tmp/cloudflared_token_backup
     fi
 
-    # Install if missing
     if ! command -v cloudflared >/dev/null 2>&1; then
         echo -e "${YELLOW}Cloudflared install...${NC}"
         mkdir -p --mode=0755 /usr/share/keyrings
@@ -710,7 +702,6 @@ auto_setup_cloudflared() {
         apt-get install -y cloudflared >/dev/null 2>&1
     fi
 
-    # Service via token
     if [ -f /etc/cloudflared/token ]; then
         TOKEN=$(cat /etc/cloudflared/token)
         if [ -n "$TOKEN" ]; then
@@ -723,7 +714,7 @@ auto_setup_cloudflared() {
             fi
         fi
     else
-        echo -e "${YELLOW}   ! Cloudflared token nahi mila. Manual install karein.${NC}"
+        echo -e "${YELLOW}   ! Cloudflared token nahi mila.${NC}"
     fi
 }
 
@@ -735,7 +726,7 @@ auto_setup_tailscale() {
             curl -fsSL https://tailscale.com/install.sh | sh >/dev/null 2>&1
         fi
         systemctl enable --now tailscaled >/dev/null 2>&1
-        echo -e "${GREEN}   ✓ Tailscale Ready (Login: tailscale up)${NC}"
+        echo -e "${GREEN}   ✓ Tailscale Ready${NC}"
     fi
 }
 
@@ -844,7 +835,6 @@ restore_backup() {
     auto_setup_cloudflared
     auto_setup_tailscale
 
-    # Restart everything
     systemctl restart docker >/dev/null 2>&1 || true
     systemctl restart wings >/dev/null 2>&1 || true
     systemctl restart nginx >/dev/null 2>&1 || true
@@ -856,7 +846,6 @@ restore_backup() {
     echo -e "${GREEN} ✓ 100% RESTORE + AUTO-SETUP COMPLETE!            ${NC}"
     echo -e "${GREEN}════════════════════════════════════════════════════${NC}"
 
-    # Final Status
     echo ""
     echo -e "${CYAN}Live Services Status:${NC}"
     for svc in nginx mysql redis-server php8.3-fpm docker wings cloudflared tailscaled supervisor; do
@@ -931,7 +920,7 @@ manual_full_setup() {
         1) auto_setup_panel ;;
         2) auto_setup_wings ;;
         3) auto_setup_cloudflared ;;
-        4) auto_setup_tailscale ;;
+        4) auto_setup_cloudflared ;;
         5) auto_setup_panel; auto_setup_wings; auto_setup_cloudflared; auto_setup_tailscale ;;
         0) return ;;
     esac
@@ -947,7 +936,7 @@ while true; do
     clear
     load_backup_name
     echo -e "${GREEN}╔════════════════════════════════════════════════╗${NC}"
-    echo -e "${GREEN}║   SMART BACKUP MANAGER v10 (Panel Auto-Live)   ║${NC}"
+    echo -e "${GREEN}║   SMART BACKUP MANAGER v10 (Default Server Fix)║${NC}"
     echo -e "${GREEN}╠════════════════════════════════════════════════╣${NC}"
     if [ -n "$BACKUP_NAME" ]; then
     echo -e "${GREEN}║  Name: ${YELLOW}${BACKUP_NAME}${NC}   Folder: ${YELLOW}BackupVps/${BACKUP_NAME}/${NC}"
